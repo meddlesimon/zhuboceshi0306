@@ -173,36 +173,51 @@ export const parseStandardsCSV = (text: string): Standard[] => {
   }
 
   const standards: Standard[] = [];
+  const rawStandards: any[] = [];
 
-  // Iterate rows (skip header if we are confident it is a header)
+  // 1. First pass: extract raw data and calculate total length of "content"
+  let totalContentLength = 0;
+
   for (let i = 1; i < rows.length; i++) {
     const row = rows[i];
-    
-    // Extract raw values
     const rawCat = catIdx !== -1 ? row[catIdx] : '';
     const rawImp = impIdx !== -1 ? row[impIdx] : '';
     const rawFocus = focusIdx !== -1 ? row[focusIdx] : '';
     const rawScript = scriptIdx !== -1 ? row[scriptIdx] : '';
 
-    // Guard: Empty row
     if (!rawFocus && !rawScript && !rawCat) continue;
 
-    // Intelligent Filling
     const finalContent = rawScript || rawFocus;
     const finalFocus = rawFocus || (rawScript.length > 20 ? rawScript.substring(0, 20) + '...' : rawScript);
-
-    // Strict Type Determination: ONLY look at rawCat
-    // We do NOT use content text to guess anymore, as per user request.
     const type = determineType(rawCat);
-    
     const importance = determineImportance(rawImp);
 
-    standards.push({
+    if (type === 'mandatory') {
+      totalContentLength += finalContent.length;
+    }
+
+    rawStandards.push({
       id: uuidv4(),
       type,
       importance,
       qaFocus: finalFocus,
       content: finalContent
+    });
+  }
+
+  // 2. Second pass: calculate theoretical_pos based on content length density
+  let accumulatedContentLength = 0;
+  for (const s of rawStandards) {
+    let theoretical_pos = 0.5; // Default for forbidden
+    if (s.type === 'mandatory' && totalContentLength > 0) {
+      // Ratio = (previous length + current length / 2) / total length
+      theoretical_pos = (accumulatedContentLength + s.content.length / 2) / totalContentLength;
+      accumulatedContentLength += s.content.length;
+    }
+
+    standards.push({
+      ...s,
+      theoretical_pos
     });
   }
 

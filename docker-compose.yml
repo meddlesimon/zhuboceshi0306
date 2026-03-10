@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  anchor-analyzer-v27:
+    build: .
+    ports:
+      - "8081:3000"
+    environment:
+      - GEMINI_API_KEY=sk-3TO0OtML740DE4C47351T3BLBKFJc576476F8D79476ba371
+      - GEMINI_MODEL=gemini-3.1-flash-lite-preview
+      - GEMINI_URL=https://cn2us02.opapi.win/v1/chat/completions
+      - PORT=3000
+      - NODE_ENV=production
+    dns:
+      - 114.114.114.114
+      - 8.8.8.8
+    restart: always

@@ -1,20 +1,53 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# 主播话术分析器 - 豆包 (Doubao) 模型版
 
-# Run and deploy your AI Studio app
+本项目已经从 Google Gemini 迁移到字节跳动豆包大模型，并增加了后端代理服务器以保护 API Key。
 
-This contains everything you need to run your app locally.
+## 本地开发
 
-View your app in AI Studio: https://ai.studio/apps/drive/1ovHrMpMgfQ46K7nuxQX6uoud8N61hpKQ
+1. **安装依赖**:
+   ```bash
+   npm install
+   ```
 
-## Run Locally
+2. **配置环境变量**:
+   在根目录创建 `.env` 文件:
+   ```env
+   ARK_API_KEY=88c6cb59-4d69-4977-8bbd-44f069368e75
+   ARK_ENDPOINT_ID=ep-m-20260306153633-vwmsq
+   ```
 
-**Prerequisites:**  Node.js
+3. **启动开发环境**:
+   - 启动后端: `npm run server` (运行在 3001 端口)
+   - 启动前端: `npm run dev` (运行在 3000 端口，并自动代理 `/api` 到 3001)
 
+## 部署到腾讯云 Lighthouse (最简方式)
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+本项目已提供 Docker 支持，您只需要在服务器上执行以下步骤：
+
+1. **上传代码**: 将整个项目文件夹上传到服务器。
+2. **启动服务**:
+   在项目根目录下执行：
+   ```bash
+   sudo docker-compose up -d --build
+   ```
+
+3. **访问**:
+   通过服务器公网 IP `http://118.25.186.95` 即可直接访问。
+
+## 🚀 最新部署信息 (Latest Deployment)
+
+- **服务地址**: [http://118.25.186.95:8081](http://118.25.186.95:8081)
+- **部署时间**: 2026-03-08 19:10:30
+- **部署配置**: Docker-compose (8081 -> 3000)
+- **核心更新**:
+  - ✅ **三点式定位算法**: 使用开头5字+中间5字+末尾5字进行匹配，极大提升定位成功率。
+  - ✅ **精准蓝色高亮**: 点击定位后，原文区域实时显示淡蓝色背景高亮。
+  - ✅ **“一刀切”质检**: 完全废除复杂的窗口搜索，直接根据锚点截取全量文本投喂 AI。
+  - ✅ **优化重新定位**: 点击重新定位按钮自动跳转高亮，方便用户核对。
+  - ✅ **常驻下一步按钮**: 右侧栏底部固定显示“进入质检”按钮。
+
+---
+
+### 关键配置项
+- **端口映射**: 映射到服务器 8081 端口。
+- **API Key 隐藏**: API Key 存储在服务器端的环境变量中，前端无法直接看到。

@@ -1,12 +1,13 @@
 
 import React, { useState } from 'react';
-import { Standard, AppStep, AnalysisResult, MultiRoundResult, StreamMetadata } from './types';
+import { Standard, AppStep, AnalysisResult, MultiRoundResult, StreamMetadata, AnchorResult } from './types';
 import Header from './components/Header';
 import ReportView from './components/ReportView';
 import FileUploader from './components/FileUploader';
 import StandardsExport from './components/StandardsExport'; // Import the new component
+import AnchorVerification from './components/AnchorVerification'; // Import the new component
 import { parseStandardsCSV, parseTranscript, parseMetadataFromFilename } from './utils/csvHelper';
-import { analyzeScript, splitTranscript } from './services/geminiService';
+import { analyzeScript, splitTranscript, findCandidateAnchors } from './services/doubaoService';
 import { 
   Loader2, 
   ShieldCheck, 
@@ -24,10 +25,13 @@ import {
 } from 'lucide-react';
 
 const App: React.FC = () => {
-  const [step, setStep] = useState<AppStep>(AppStep.UPLOAD_STANDARDS);
+  const [step, setStep] = useState<AppStep>(AppStep.LOGIN);
+  const [isLoginLoading, setIsLoginLoading] = useState(false);
   const [standards, setStandards] = useState<Standard[]>([]);
   const [transcript, setTranscript] = useState<string>('');
+  const [fullRawText, setFullRawText] = useState<string>('');
   const [result, setResult] = useState<MultiRoundResult | null>(null);
+  const [candidateAnchors, setCandidateAnchors] = useState<AnchorResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   
   const [standardsFileName, setStandardsFileName] = useState<string>('');
@@ -42,6 +46,32 @@ const App: React.FC = () => {
   // Dual Round Toggle
   // Changed default to true as per user request
   const [isDualRound, setIsDualRound] = useState(true);
+
+  const [analysisProgress, setAnalysisProgress] = useState<string>('');
+  const [analysisBatches, setAnalysisBatches] = useState<any[]>([]);
+  const [isScanning, setIsScanning] = useState(false);
+
+  const handleAdminLogin = async (u: string, p: string) => {
+    setIsLoginLoading(true);
+    setError(null);
+    try {
+      const response = await fetch('/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: u, password: p })
+      });
+      const data = await response.json();
+      if (data.success) {
+        setStep(AppStep.UPLOAD_STANDARDS);
+      } else {
+        setError(data.error || "账号或密码错误");
+      }
+    } catch (err: any) {
+      setError("连接服务器失败，请稍后重试");
+    } finally {
+      setIsLoginLoading(false);
+    }
+  };
 
   const handleStandardsUpload = (content: string, fileName: string) => {
     try {
@@ -67,6 +97,7 @@ const App: React.FC = () => {
 
   const handleTranscriptUpload = (content: string, fileName: string) => {
     try {
+      setFullRawText(content); // Store 100% original content
       const parsed = parseTranscript(content);
       if (!parsed || parsed.length < 5) {
         throw new Error("文本内容过短或为空，请检查文件。");
@@ -83,51 +114,103 @@ const App: React.FC = () => {
     }
   };
 
-  const startAnalysis = async () => {
+  const startScanningAnchors = async () => {
+    if (!isDualRound) {
+      startAnalysis(null);
+      return;
+    }
+
+    setIsScanning(true);
+    setError(null);
+    try {
+      const anchors = await findCandidateAnchors(transcript);
+      setCandidateAnchors(anchors);
+      setStep(AppStep.VERIFY_ANCHORS);
+    } catch (err: any) {
+      setError(`锚点预找失败: ${err.message}`);
+    } finally {
+      setIsScanning(false);
+    }
+  };
+
+  const startAnalysis = async (manualAnchors: any) => {
     setStep(AppStep.ANALYZING);
+    setAnalysisBatches([]);
+    setError(null);
     try {
       if (isDualRound) {
         // 1. Dual Round Mode
         // Step A: Split
-        const { part1, part2 } = await splitTranscript(transcript);
+        setAnalysisProgress('正在执行 4-视窗严格切分...');
+        const { part1, part2, anchors } = await splitTranscript(transcript, manualAnchors);
         
         if (!part2 || part2.length < 50) {
            // Fallback if split failed
            console.warn("Split failed or not found, falling back to single round.");
-           const singleRes = await analyzeScript(transcript, standards);
+           setAnalysisProgress('未检测到第二轮，正在进行全量质检...');
+           const singleRes = await analyzeScript(
+             transcript, 
+             standards,
+             (init) => setAnalysisBatches(init),
+             (id, status) => setAnalysisBatches(prev => prev.map(b => b.id === id ? {...b, status} : b))
+           );
            setResult({ 
              round1: singleRes, 
              round1Text: transcript,
+             fullRawText: fullRawText,
              isDualMode: false 
            });
            setError("AI 未能检测到明显的第二轮开始点，已自动切换为单轮质检。");
         } else {
            // Step B: Analyze Both
+           setAnalysisProgress('检测到双轮结构，正在并行分析中...');
            const [res1, res2] = await Promise.all([
-             analyzeScript(part1, standards),
-             analyzeScript(part2, standards)
+             analyzeScript(
+               part1, 
+               standards,
+               (init) => setAnalysisBatches(prev => [...prev, ...init.map(b => ({...b, id: 'r1-'+b.id, label: '第一轮: ' + b.label}))]),
+               (id, status) => setAnalysisBatches(prev => prev.map(b => b.id === 'r1-'+id ? {...b, status} : b))
+             ),
+             analyzeScript(
+               part2, 
+               standards,
+               (init) => setAnalysisBatches(prev => [...prev, ...init.map(b => ({...b, id: 'r2-'+b.id, label: '第二轮: ' + b.label}))]),
+               (id, status) => setAnalysisBatches(prev => prev.map(b => b.id === 'r2-'+id ? {...b, status} : b))
+             )
            ]);
            setResult({ 
              round1: res1, 
              round2: res2, 
              round1Text: part1,
              round2Text: part2,
-             isDualMode: true 
+             fullRawText: fullRawText,
+             isDualMode: true,
+             splitAnchors: anchors
            });
         }
       } else {
         // 2. Single Round Mode
-        const data = await analyzeScript(transcript, standards);
+        setAnalysisProgress('正在对比质检标准，请稍候...');
+        const data = await analyzeScript(
+          transcript, 
+          standards,
+          (init) => setAnalysisBatches(init),
+          (id, status) => setAnalysisBatches(prev => prev.map(b => b.id === id ? {...b, status} : b))
+        );
         setResult({ 
           round1: data, 
           round1Text: transcript,
+          fullRawText: fullRawText,
           isDualMode: false 
         });
       }
       
       setStep(AppStep.REPORT);
     } catch (err: any) {
-      setError(err.message || "检测过程出错，请重试。");
+      console.error("Analysis Error:", err);
+      // Try to extract more detailed error info from backend
+      const detail = err.response?.data?.error || err.response?.data?.error_detail || err.message;
+      setError(`检测失败: ${detail}。请检查网络、余额或 AI 配置。`);
       setStep(AppStep.UPLOAD_TRANSCRIPT);
     }
   };
@@ -136,6 +219,7 @@ const App: React.FC = () => {
     setStep(AppStep.UPLOAD_STANDARDS);
     setStandards([]);
     setTranscript('');
+    setFullRawText('');
     setStandardsFileName('');
     setMetadata({ fileName: '', anchorName: '', date: '', round: '' });
     setResult(null);
@@ -149,24 +233,37 @@ const App: React.FC = () => {
   const totalCount = standards.length;
 
   return (
-    <div className="min-h-screen bg-slate-100 font-sans text-slate-900 flex justify-center print:bg-white print:h-auto">
-      <div className="w-full max-w-lg bg-white min-h-screen shadow-2xl flex flex-col relative print:max-w-none print:shadow-none print:min-h-0">
+    <div className="min-h-screen bg-slate-100 font-sans text-slate-900 flex justify-center print:bg-white print:h-auto overflow-x-hidden">
+      <div className={`w-full bg-white min-h-screen shadow-2xl flex flex-col relative print:max-w-none print:shadow-none print:min-h-0 transition-all duration-500 ease-in-out ${step === AppStep.REPORT ? 'max-w-none' : 'max-w-[600px]'}`}>
         <Header />
 
         <main className="flex-1 overflow-y-auto print:overflow-visible">
-          {step !== AppStep.REPORT && (
+          {step === AppStep.LOGIN && (
+            <LoginView onLogin={handleAdminLogin} loading={isLoginLoading} />
+          )}
+
+          {step !== AppStep.REPORT && step !== AppStep.LOGIN && (
             <div className="px-6 pt-6 pb-2 print:hidden">
               <div className="flex justify-between items-center text-xs font-medium text-slate-400">
                 <span className={step === AppStep.UPLOAD_STANDARDS ? "text-blue-600 font-bold" : ""}>1. 标准</span>
                 <span className="h-px flex-1 bg-slate-200 mx-2"></span>
                 <span className={step === AppStep.UPLOAD_TRANSCRIPT ? "text-blue-600 font-bold" : ""}>2. 文本</span>
                 <span className="h-px flex-1 bg-slate-200 mx-2"></span>
-                <span className={step === AppStep.ANALYZING ? "text-blue-600 font-bold" : ""}>3. 质检</span>
+                <span className={step === AppStep.VERIFY_ANCHORS ? "text-blue-600 font-bold" : ""}>3. 核对</span>
+                <span className="h-px flex-1 bg-slate-200 mx-2"></span>
+                <span className={step === AppStep.ANALYZING ? "text-blue-600 font-bold" : ""}>4. 质检</span>
               </div>
             </div>
           )}
 
           <div className="p-6 print:p-0">
+            {step === AppStep.LOGIN && error && (
+              <div className="bg-red-50 text-red-600 p-3 rounded-lg text-xs flex items-start gap-2 mb-4 animate-in slide-in-from-top-2">
+                <AlertTriangle size={14} className="shrink-0 mt-0.5" />
+                {error}
+              </div>
+            )}
+
             {step === AppStep.UPLOAD_STANDARDS && (
               <div className="space-y-6 animate-in slide-in-from-right-8 fade-in duration-300">
                 <div>
@@ -375,11 +472,18 @@ const App: React.FC = () => {
                     </div>
 
                     <button 
-                      onClick={startAnalysis}
+                      onClick={startScanningAnchors}
+                      disabled={isScanning}
                       className="w-full py-3 bg-blue-600 text-white font-bold rounded-xl shadow-lg shadow-blue-200 active:scale-95 transition-transform flex items-center justify-center gap-2"
                     >
-                      {isDualRound ? '开始双轮质检' : '开始全量质检'}
-                      <Loader2 size={16} className="animate-spin" style={{ display: 'none' }} /> 
+                      {isScanning ? (
+                        <>
+                          <Loader2 size={16} className="animate-spin" />
+                          正在扫描锚点...
+                        </>
+                      ) : (
+                        isDualRound ? '下一步：核对锚点' : '开始全量质检'
+                      )}
                     </button>
                     <p className="text-[10px] text-center text-slate-400 mt-2">
                       将检查全部 {standards.length} 条规则 (含{todayCount}条今日重点)
@@ -409,27 +513,69 @@ const App: React.FC = () => {
               </div>
             )}
 
+            {step === AppStep.VERIFY_ANCHORS && candidateAnchors && (
+              <AnchorVerification 
+                fullText={transcript} 
+                initialAnchors={candidateAnchors} 
+                onConfirm={(final) => startAnalysis(final)}
+                onBack={() => setStep(AppStep.UPLOAD_TRANSCRIPT)}
+              />
+            )}
+
             {step === AppStep.ANALYZING && (
-              <div className="flex flex-col items-center justify-center h-64 space-y-6 animate-in fade-in duration-500">
-                <div className="relative">
-                  <div className="absolute inset-0 bg-blue-100 rounded-full animate-ping opacity-75"></div>
-                  <div className="relative bg-white p-4 rounded-full shadow-xl border border-blue-50">
-                    <Loader2 size={32} className="text-blue-600 animate-spin" />
-                  </div>
+              <div className="space-y-6 animate-in fade-in duration-500">
+                <div className="text-center">
+                   <h2 className="text-lg font-bold text-slate-800 mb-1">AI 专家集群正在质检</h2>
+                   <p className="text-xs text-slate-400">已开启并行加速，各组专家正在独立作业</p>
                 </div>
-                <div className="text-center space-y-2">
-                  <h2 className="text-lg font-bold text-slate-800">
-                    {isDualRound ? "正在进行双轮拆分与质检..." : "正在进行全量质检..."}
-                  </h2>
-                  <p className="text-sm text-slate-500 px-4">
-                    {isDualRound && (
-                      <span className="block mb-1 text-indigo-600 font-bold bg-indigo-50 py-0.5 rounded">
-                        AI 正在分析结构并拆分第一轮/第二轮
-                      </span>
-                    )}
-                    正在逐条比对全部 {standards.length} 条标准<br/>
-                    (含 {todayCount} 条今日重点 + {totalCount - todayCount} 条日常规范)
-                  </p>
+
+                {/* 批次进度条列表 */}
+                <div className="bg-slate-50 rounded-2xl border border-slate-100 p-4 space-y-3 max-h-[400px] overflow-y-auto shadow-inner">
+                  {analysisBatches.length > 0 ? (
+                    analysisBatches.map((batch) => (
+                      <div key={batch.id} className="space-y-1.5">
+                        <div className="flex justify-between text-[10px] font-bold">
+                          <span className="text-slate-600">{batch.label}</span>
+                          <span className={
+                            batch.status === 'completed' ? 'text-green-500' : 
+                            batch.status === 'loading' ? 'text-blue-500 animate-pulse' : 'text-slate-300'
+                          }>
+                            {batch.status === 'completed' ? '已完成' : 
+                             batch.status === 'loading' ? '正在分析...' : 
+                             batch.status === 'error' ? '出错了' : '排队中'}
+                          </span>
+                        </div>
+                        <div className="h-2 w-full bg-white rounded-full overflow-hidden border border-slate-100">
+                          <div 
+                            className={`h-full transition-all duration-700 ease-in-out ${
+                              batch.status === 'completed' ? 'bg-green-500' : 
+                              batch.status === 'loading' ? 'bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.5)]' : 'bg-transparent'
+                            }`}
+                            style={{ 
+                              width: batch.status === 'completed' ? '100%' : batch.status === 'loading' ? '70%' : '0%' 
+                            }}
+                          ></div>
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="flex flex-col items-center justify-center py-8 space-y-4">
+                      <Loader2 size={32} className="text-blue-600 animate-spin" />
+                      <p className="text-xs text-slate-400">{analysisProgress || "准备中..."}</p>
+                    </div>
+                  )}
+                </div>
+
+                <div className="bg-blue-50 rounded-xl p-3 flex items-center gap-3">
+                  <div className="bg-blue-600 p-2 rounded-lg text-white">
+                    <Loader2 size={16} className="animate-spin" />
+                  </div>
+                  <div className="flex-1">
+                    <p className="text-xs text-blue-700 leading-tight">
+                      <strong>正在进行精密比对</strong><br/>
+                      AI 正在对全部 {standards.length} 条标准进行深度扫描...
+                    </p>
+                  </div>
                 </div>
               </div>
             )}
@@ -439,6 +585,86 @@ const App: React.FC = () => {
              <ReportView result={result} standards={standards} metadata={metadata} onReset={resetApp} />
           )}
         </main>
+      </div>
+    </div>
+  );
+};
+
+// 在 App.tsx 中添加以下组件定义
+const LoginView: React.FC<{ onLogin: (u: string, p: string) => void; loading: boolean }> = ({ onLogin, loading }) => {
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+
+  return (
+    <div className="flex flex-col items-center justify-center py-24 px-8 space-y-10 animate-in fade-in zoom-in duration-500">
+      {/* 品牌图标 */}
+      <div className="relative">
+        <div className="absolute -inset-1 bg-gradient-to-r from-blue-600 to-indigo-600 rounded-3xl blur opacity-25"></div>
+        <div className="relative w-24 h-24 bg-gradient-to-br from-blue-600 to-indigo-700 rounded-3xl flex items-center justify-center shadow-2xl transform hover:scale-105 transition-transform duration-300">
+          <ShieldCheck size={48} className="text-white" />
+        </div>
+      </div>
+
+      {/* 标题区 */}
+      <div className="text-center space-y-3">
+        <h2 className="text-3xl font-black tracking-tight text-slate-900">
+          AI 智能质检
+          <span className="block text-blue-600 text-lg font-bold mt-1">管理控制台</span>
+        </h2>
+        <div className="h-1.5 w-12 bg-blue-600 rounded-full mx-auto"></div>
+      </div>
+
+      {/* 输入区 */}
+      <div className="w-full space-y-6">
+        <div className="space-y-2 group">
+          <label className="text-xs font-bold text-slate-500 uppercase ml-1 flex items-center gap-1.5 transition-colors group-focus-within:text-blue-600">
+            <span className="w-1.5 h-1.5 rounded-full bg-blue-600"></span>
+            管理员账号
+          </label>
+          <input
+            type="text"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            className="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl px-5 py-4 text-base outline-none focus:border-blue-500 focus:bg-white transition-all shadow-sm"
+            placeholder="请输入账号"
+          />
+        </div>
+
+        <div className="space-y-2 group">
+          <label className="text-xs font-bold text-slate-500 uppercase ml-1 flex items-center gap-1.5 transition-colors group-focus-within:text-blue-600">
+            <span className="w-1.5 h-1.5 rounded-full bg-blue-600"></span>
+            访问密码
+          </label>
+          <input
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            className="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl px-5 py-4 text-base outline-none focus:border-blue-500 focus:bg-white transition-all shadow-sm"
+            placeholder="请输入密码"
+          />
+        </div>
+
+        {/* 登录按钮 */}
+        <button
+          onClick={() => onLogin(username, password)}
+          disabled={loading || !username || !password}
+          className="group relative w-full overflow-hidden rounded-2xl bg-slate-900 py-5 text-white shadow-xl transition-all hover:bg-slate-800 active:scale-[0.98] disabled:opacity-50 disabled:active:scale-100 disabled:cursor-not-allowed"
+        >
+          <div className="relative flex items-center justify-center gap-3 font-bold text-lg">
+            {loading ? (
+              <Loader2 className="animate-spin" size={24} />
+            ) : (
+              <>
+                <span>进入系统</span>
+                <ArrowRight size={20} className="transition-transform group-hover:translate-x-1" />
+              </>
+            )}
+          </div>
+        </button>
+
+        <p className="text-center text-[10px] text-slate-400 font-medium tracking-widest uppercase">
+          Secure Access System • Version 2.0
+        </p>
       </div>
     </div>
   );

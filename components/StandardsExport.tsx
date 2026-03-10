@@ -149,7 +149,7 @@ const StandardsExport: React.FC<StandardsExportProps> = ({ standards, fileName }
         {/* NOTE: We set a fixed max-width here which matches TARGET_WIDTH in export logic */}
         <div 
           ref={cardRef} 
-          className="bg-white w-full max-w-[480px] shadow-sm rounded-xl p-6 md:p-8 text-slate-900 relative"
+          className="bg-white w-full max-w-[600px] shadow-sm rounded-xl p-6 md:p-8 text-slate-900 relative"
         >
           {/* Header Section */}
           <div className="border-b-4 border-slate-900 pb-5 mb-6">

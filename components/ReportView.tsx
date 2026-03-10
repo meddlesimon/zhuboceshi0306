@@ -23,8 +23,13 @@ import {
   XCircle,
   Save,
   Trash2,
-  Undo2
+  Undo2,
+  Layout,
+  Activity,
+  Split,
+  XCircle as XCircleIcon
 } from 'lucide-react';
+import AdminAuditView from './AdminAuditView';
 
 // Declare global html2pdf from the script tag
 declare var html2pdf: any;
@@ -132,21 +137,37 @@ const ManualReviewBlock: React.FC<{
   );
 };
 
+/**
+ * Expandable Text Component for long quotes or comments
+ * 修改：直接显示全部内容，不再进行截断
+ */
+const ExpandableText: React.FC<{ text: string, maxLen?: number, className?: string, italic?: boolean }> = ({ text, className = "", italic = false }) => {
+  return (
+    <div className={className}>
+      <p className={`text-sm leading-relaxed ${italic ? 'italic' : ''} whitespace-pre-wrap break-words`}>
+        {text}
+      </p>
+    </div>
+  );
+};
+
 const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, onReset }) => {
   const [isExporting, setIsExporting] = useState(false);
   const [activeRound, setActiveRound] = useState<'round1' | 'round2'>('round1');
   const [highlightQuote, setHighlightQuote] = useState<string>('');
   const [showBackToTop, setShowBackToTop] = useState(false);
+  const [lastClickedId, setLastClickedId] = useState<string | null>(null); // 新增：记录跳转来源 ID
+  const [showAdminAudit, setShowAdminAudit] = useState(false); // 新增：管理员核对页面开关
   
   // Local State for Reviews
-  const [localResult, setLocalResult] = useState<MultiRoundResult>(JSON.parse(JSON.stringify(result)));
+  const [localResult, setLocalResult] = useState<MultiRoundResult>(result);
 
   const reportRef = useRef<HTMLDivElement>(null);
   const transcriptRef = useRef<HTMLDivElement>(null);
 
   // Sync props to local state if props change (re-analysis)
   useEffect(() => {
-    setLocalResult(JSON.parse(JSON.stringify(result)));
+    setLocalResult(result);
   }, [result]);
 
   // Scroll Listener
@@ -166,24 +187,25 @@ const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, on
     ? localResult.round1 
     : (localResult.round2 || localResult.round1); 
 
-  const currentTranscript = activeRound === 'round1' ? localResult.round1Text : localResult.round2Text || '';
+  const fullRawTranscript = localResult.fullRawText || (localResult.round1Text + (localResult.round2Text || ''));
 
   useEffect(() => {
     if (highlightQuote && transcriptRef.current) {
       setTimeout(() => {
         const highlightEl = transcriptRef.current?.querySelector('.highlight-active');
         if (highlightEl) {
-          highlightEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          highlightEl.scrollIntoView({ behavior: 'auto', block: 'center' });
         }
-      }, 100);
+      }, 50);
     }
   }, [highlightQuote, activeRound]);
 
-  const handleQuoteClick = (quote: string) => {
+  const handleQuoteClick = (quote: string, id: string) => {
     if (!quote || quote.length < 2) return;
     setHighlightQuote(quote);
+    setLastClickedId(id); // 记录是哪个规则触发的跳转
     if (transcriptRef.current) {
-        transcriptRef.current.scrollIntoView({ behavior: 'smooth' });
+        transcriptRef.current.scrollIntoView({ behavior: 'auto' });
     }
   };
 
@@ -254,7 +276,7 @@ const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, on
     overlay.style.paddingBottom = '20px';
 
     // The export target container (Strict Mobile Width)
-    const MOBILE_WIDTH = 390; 
+    const MOBILE_WIDTH = 600; 
     const target = document.createElement('div');
     target.style.width = `${MOBILE_WIDTH}px`;
     target.style.minHeight = '100vh';
@@ -501,44 +523,91 @@ const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, on
   }, [standards, currentResult.forbidden_issues]);
 
   const { missedMandatory, passedMandatory } = useMemo(() => {
-    const missed = currentResult.mandatory_checks.filter(c => c.status === 'missed');
-    const passed = currentResult.mandatory_checks.filter(c => c.status === 'passed');
+    const missed = currentResult.mandatory_checks.filter(c => c.status === 'missed' || c.performance_grade === 'poor');
+    const passed = currentResult.mandatory_checks.filter(c => c.status === 'passed' && c.performance_grade !== 'poor');
     return { missedMandatory: missed, passedMandatory: passed };
   }, [currentResult.mandatory_checks]);
 
   // Match Logic
-  const clean = (str: string) => str.replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, '');
+  /** 清理字符串，只保留汉字、英文和数字，去掉其它标点空格等 */
+  const clean = (str: string) => {
+    return str.replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, '');
+  };
+
+  /** 在 clean 后的字符串中，找到所有子串 sub 出现的起始下标 */
   const getAllIndices = (str: string, sub: string): number[] => {
     const indices: number[] = [];
     if (!sub) return indices;
     let i = -1;
-    while ((i = str.indexOf(sub, i + 1)) !== -1) { indices.push(i); }
+    while ((i = str.indexOf(sub, i + 1)) !== -1) {
+      indices.push(i);
+    }
     return indices;
   };
-  const mapToOriginal = (originalText: string, cleanStartIdx: number, cleanLength: number, method: string) => {
+
+  /**
+   * 将 clean 字符串中的区间映射回原始字符串的开始和结束位置
+   */
+  const mapToOriginal = (
+    originalText: string,
+    cleanStartIdx: number,
+    cleanLength: number,
+    method: string
+  ): { start: number; end: number; found: boolean; method: string } => {
     let currentCleanIdx = 0;
     let originalStart = -1;
     let originalEnd = -1;
+
     for (let i = 0; i < originalText.length; i++) {
       const char = originalText[i];
-      if (/[^\u4e00-\u9fa5a-zA-Z0-9]/.test(char)) { continue; }
-      if (currentCleanIdx === cleanStartIdx) { originalStart = i; }
+      if (/[^\u4e00-\u9fa5a-zA-Z0-9]/.test(char)) {
+        continue;
+      }
+      if (currentCleanIdx === cleanStartIdx) {
+        originalStart = i;
+      }
       currentCleanIdx++;
-      if (currentCleanIdx === cleanStartIdx + cleanLength) { originalEnd = i + 1; break; }
+      if (currentCleanIdx === cleanStartIdx + cleanLength) {
+        originalEnd = i + 1;
+        break;
+      }
     }
-    if (originalStart !== -1 && originalEnd === -1) { originalEnd = originalText.length; }
-    return { start: originalStart !== -1 ? originalStart : 0, end: originalEnd !== -1 ? originalEnd : 0, found: originalStart !== -1, method };
+    if (originalStart !== -1 && originalEnd === -1) {
+      originalEnd = originalText.length;
+    }
+    return {
+      start: originalStart >= 0 ? originalStart : 0,
+      end: originalEnd >= 0 ? originalEnd : 0,
+      found: originalStart >= 0,
+      method,
+    };
   };
-  const findBestMatch = (fullText: string, quote: string): { start: number, end: number, found: boolean, method: string } => {
-    if (!quote || quote.length < 2) return { start: 0, end: 0, found: false, method: 'none' };
+
+  /**
+   * 在原始全文 fullText 中定位子串 quote
+   */
+  const findBestMatch = (
+    fullText: string,
+    quote: string
+  ): { start: number; end: number; found: boolean; method: string } => {
+    if (!quote || quote.length < 2) {
+      return { start: 0, end: 0, found: false, method: 'none' };
+    }
+
     const cleanFull = clean(fullText);
     const cleanQuote = clean(quote);
     const len = cleanQuote.length;
-    
-    const exactIdx = cleanFull.indexOf(cleanQuote);
-    if (exactIdx !== -1) return mapToOriginal(fullText, exactIdx, len, 'exact');
-    if (len < 6) return { start: 0, end: 0, found: false, method: 'none' };
 
+    // 1. 精确匹配
+    const exactIdx = cleanFull.indexOf(cleanQuote);
+    if (exactIdx !== -1) {
+      return mapToOriginal(fullText, exactIdx, len, 'exact');
+    }
+    if (len < 6) {
+      return { start: 0, end: 0, found: false, method: 'none' };
+    }
+
+    // 准备样本段 head/tail/mid
     const sampleSize = len > 12 ? 4 : 3;
     const head = cleanQuote.substring(0, sampleSize);
     const tail = cleanQuote.substring(len - sampleSize);
@@ -547,48 +616,101 @@ const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, on
 
     const heads = getAllIndices(cleanFull, head);
     const tails = getAllIndices(cleanFull, tail);
-    const mids = getAllIndices(cleanFull, mid);
+    const mids  = getAllIndices(cleanFull, mid);
     const minLen = len * 0.7;
     const maxLen = len * 1.3;
 
+    // 2. head-tail 匹配
     for (const h of heads) {
       for (const t of tails) {
-        const dist = t - h + sampleSize; 
-        if (dist > 0 && dist >= minLen && dist <= maxLen) return mapToOriginal(fullText, h, dist, 'head-tail');
+        const dist = t - h + sampleSize;
+        if (dist > 0 && dist >= minLen && dist <= maxLen) {
+          return mapToOriginal(fullText, h, dist, 'head-tail');
+        }
       }
     }
-    const headToMidLen = midStart + sampleSize; 
+    // 3. head-mid 模糊匹配
+    const headToMidLen = midStart + sampleSize;
     for (const h of heads) {
       for (const m of mids) {
-        const dist = m - h + sampleSize; 
-        if (dist > 0 && dist >= headToMidLen * 0.7 && dist <= headToMidLen * 1.3) return mapToOriginal(fullText, h, len, 'head-mid'); 
+        const dist = m - h + sampleSize;
+        if (dist > 0 && dist >= headToMidLen * 0.7 && dist <= headToMidLen * 1.3) {
+          return mapToOriginal(fullText, h, len, 'head-mid');
+        }
       }
     }
+    // 4. mid-tail 模糊匹配
     const midToTailLen = len - midStart;
     for (const m of mids) {
       for (const t of tails) {
         const dist = t - m + sampleSize;
-        if (dist > 0 && dist >= midToTailLen * 0.7 && dist <= midToTailLen * 1.3) {
-           const inferredStart = Math.max(0, t - len + sampleSize);
-           return mapToOriginal(fullText, inferredStart, len, 'mid-tail');
+        if (
+          dist > 0 &&
+          dist >= midToTailLen * 0.7 &&
+          dist <= midToTailLen * 1.3
+        ) {
+          const inferredStart = Math.max(0, t - len + sampleSize);
+          return mapToOriginal(fullText, inferredStart, len, 'mid-tail');
         }
       }
     }
-    if (heads.length === 1) return mapToOriginal(fullText, heads[0], len, 'anchor-head');
+    // 5. 单点锚定：head/mid/tail 任一唯一出现
+    if (heads.length === 1) {
+      return mapToOriginal(fullText, heads[0], len, 'anchor-head');
+    }
     if (mids.length === 1) {
-       const start = Math.max(0, mids[0] - midStart);
-       return mapToOriginal(fullText, start, len, 'anchor-mid');
+      const start = Math.max(0, mids[0] - midStart);
+      return mapToOriginal(fullText, start, len, 'anchor-mid');
     }
     if (tails.length === 1) {
-       const start = Math.max(0, tails[0] - len + sampleSize);
-       return mapToOriginal(fullText, start, len, 'anchor-tail');
+      const start = Math.max(0, tails[0] - len + sampleSize);
+      return mapToOriginal(fullText, start, len, 'anchor-tail');
     }
+
     return { start: 0, end: 0, found: false, method: 'none' };
   };
 
+  /**
+   * Dual-color text rendering (topic scene vs core evidence)
+   */
+  const renderDualColorText = (topicScene?: string, coreEvidence?: string) => {
+    if (!topicScene) return null;
+    if (!coreEvidence || coreEvidence.length < 2) {
+      return <ExpandableText text={topicScene} maxLen={100} italic={true} className="text-slate-800" />;
+    }
+
+    // Try to find exact position of core evidence
+    let exactIdx = topicScene.indexOf(coreEvidence);
+    if (exactIdx === -1) {
+       // If modified by AI slightly, just show them separately or fallback to simple representation
+       return (
+         <div className="flex flex-col gap-2">
+           <ExpandableText text={topicScene} maxLen={100} italic={true} className="text-slate-500" />
+           <div className="bg-orange-100 p-2 border-l-2 border-orange-500 rounded">
+             <ExpandableText text={coreEvidence} italic={true} className="text-orange-800 font-bold" />
+           </div>
+         </div>
+       );
+    }
+
+    const before = topicScene.substring(0, exactIdx);
+    const middle = topicScene.substring(exactIdx, exactIdx + coreEvidence.length);
+    const after = topicScene.substring(exactIdx + coreEvidence.length);
+
+    return (
+      <div className="text-sm leading-relaxed whitespace-pre-wrap break-words italic text-slate-500">
+        {before}
+        <span className="bg-orange-200 text-orange-900 font-bold px-1 rounded inline-block my-0.5 shadow-sm border border-orange-300">
+          {middle}
+        </span>
+        {after}
+      </div>
+    );
+  };
+
   const renderHighlightedTranscript = () => {
-     if (!highlightQuote) return currentTranscript;
-     const match = findBestMatch(currentTranscript, highlightQuote);
+     if (!highlightQuote) return fullRawTranscript;
+     const match = findBestMatch(fullRawTranscript, highlightQuote);
      if (!match.found) {
        return (
          <>
@@ -596,7 +718,7 @@ const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, on
              <AlertTriangle size={12} />
              定位失败
            </div>
-           {currentTranscript}
+           {fullRawTranscript}
          </>
        );
      }
@@ -612,11 +734,11 @@ const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, on
              <Search size={10} /> {badgeText}
            </div>
          )}
-         {currentTranscript.substring(0, start)}
+         {fullRawTranscript.substring(0, start)}
          <span id="highlight-target" className="bg-yellow-200 text-slate-900 font-bold px-1 rounded mx-0.5 border-b-2 border-yellow-400 shadow-sm highlight-active">
-           {currentTranscript.substring(start, end)}
+           {fullRawTranscript.substring(start, end)}
          </span>
-         {currentTranscript.substring(end)}
+         {fullRawTranscript.substring(end)}
        </>
      );
   };
@@ -637,11 +759,20 @@ const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, on
         
         <div className="flex gap-2">
             <button 
+              onClick={() => setShowAdminAudit(!showAdminAudit)}
+              className={`${showAdminAudit ? 'bg-slate-800' : 'bg-orange-500'} hover:opacity-90 text-white px-3 py-2 md:px-4 rounded-lg font-bold flex items-center gap-2 shadow-lg transition-all active:scale-95 text-xs md:text-sm`}
+            >
+              <Layout size={16} />
+              <span className="hidden sm:inline">{showAdminAudit ? '关闭核对台' : '打开核对台'}</span>
+              <span className="sm:hidden">核对</span>
+            </button>
+
+            <button 
               onClick={handleExportChecklist}
               className="bg-green-600 hover:bg-green-700 text-white px-3 py-2 md:px-4 rounded-lg font-bold flex items-center gap-2 shadow-lg transition-all active:scale-95 text-xs md:text-sm"
             >
               <FileSpreadsheet size={16} />
-              <span>导出已确认清单</span>
+              <span>导出清单</span>
             </button>
 
             <button 
@@ -675,322 +806,501 @@ const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, on
         </div>
       )}
 
-      {/* 3. Printable Content Area */}
-      <div id="report-content" ref={reportRef} className="bg-white max-w-3xl mx-auto p-8 md:p-12 min-h-screen">
+      {/* 3. 并排布局区域：动态调整容器最大宽度 */}
+      <div className={`flex justify-center items-start gap-6 px-4 py-8 mx-auto transition-all duration-500 ${showAdminAudit ? 'max-w-[1440px] w-full' : 'max-w-[600px]'}`}>
         
-        {/* METADATA HEADER */}
-        <div className="mb-8 border-b-2 border-slate-900 pb-6">
-           <div className="flex justify-between items-end mb-4">
-              <h1 className="text-3xl font-black text-slate-900">直播质检报告</h1>
-              {result.isDualMode && (
-                 <span className={`px-3 py-1 rounded-full text-xs font-bold text-white ${activeRound === 'round1' ? 'bg-blue-600' : 'bg-indigo-600'}`}>
-                   {activeRound === 'round1' ? '第一轮 (Round 1)' : '第二轮 (Round 2)'}
-                 </span>
-              )}
-           </div>
-           
-           <div className="bg-slate-50 rounded-xl p-5 border border-slate-200">
-              <div className="flex items-center gap-3">
-                 <div className="bg-white p-2 rounded-full border border-slate-200 text-slate-500">
-                    <User size={18} />
-                 </div>
-                 <div>
-                    <p className="text-xs text-slate-400 font-bold uppercase">主播</p>
-                    <p className="font-bold text-slate-800 text-lg">{metadata.anchorName || '未命名'}</p>
-                 </div>
-              </div>
-           </div>
-        </div>
-
-        <div className="space-y-12 animate-in fade-in duration-300" key={activeRound}>
-          {/* SECTION 1: MANDATORY */}
-          <div>
-            <div className="flex items-center gap-3 mb-6 border-b border-slate-100 pb-4">
-              <div className="bg-blue-100 p-2 rounded-lg text-blue-600">
-                <ClipboardList size={24} />
-              </div>
-              <div>
-                <h3 className="text-xl font-black text-slate-900">一定要讲</h3>
-                <p className="text-sm text-slate-500 font-medium">
-                  {missedMandatory.length > 0
-                   ? `警报：发现 ${missedMandatory.length} 处漏讲`
-                   : "关键点全部覆盖"}
-                </p>
-              </div>
-            </div>
-
-            {/* Missed Items */}
-            {missedMandatory.length > 0 && (
-              <div className="space-y-6 mb-8">
-                {missedMandatory.map((check, idx) => {
-                   // Calculate real index source
-                   const sourceIndex = activeRound === 'round1' 
-                     ? localResult.round1.mandatory_checks.indexOf(check)
-                     : (localResult.round2?.mandatory_checks.indexOf(check) ?? -1);
-
-                   const isRejected = check.reviewStatus === 'rejected';
-
-                   return (
-                    <div 
-                      key={idx} 
-                      className={`issue-card bg-white rounded-2xl border-2 overflow-hidden relative break-inside-avoid shadow-sm flex flex-col ${
-                        isRejected ? 'border-slate-200 opacity-50 grayscale' : 'border-orange-100'
-                      }`}
-                      data-review-status={check.reviewStatus || 'pending'}
-                      data-comment={check.operatorComment || ''}
-                    >
-                      {/* HEADER */}
-                      <div className={`text-white px-5 py-3 flex items-center justify-between transition-colors ${isRejected ? 'bg-slate-400' : 'bg-orange-500'}`}>
-                         <div className="flex items-center gap-2">
-                            {isRejected ? <Trash2 size={18} /> : <AlertTriangle size={18} className="text-orange-100" />}
-                            <span className="font-bold text-base tracking-wide">
-                              {isRejected ? '已标记误诊/忽略' : `漏讲警报 #${idx + 1}`}
-                            </span>
-                         </div>
-                      </div>
-
-                      {/* CONTENT BODY */}
-                      <div className={`p-5 space-y-4 flex-1 ${isRejected ? 'pointer-events-none' : ''}`}>
-                        <div>
-                          <p className={`text-xs font-bold uppercase tracking-wider mb-1 ${isRejected ? 'text-slate-400' : 'text-orange-400'}`}>缺失内容</p>
-                          <h4 className="text-lg font-black text-slate-800 leading-snug whitespace-pre-wrap break-words">
-                            {check.standard}
-                          </h4>
-                        </div>
-
-                        <div className={`rounded-xl p-4 border relative ${isRejected ? 'bg-slate-50 border-slate-200' : 'bg-orange-50 border-orange-100'}`}>
-                          <p className={`text-xs font-bold uppercase tracking-wider mb-1 flex items-center gap-1 ${isRejected ? 'text-slate-500' : 'text-orange-600'}`}>
-                             <Sparkles size={12} /> 补充建议
-                          </p>
-                          <p className="text-sm font-medium text-slate-800 leading-relaxed">
-                            {check.comment}
-                          </p>
-                        </div>
-
-                        {check.detected_content && check.detected_content.length > 2 && (
-                          <div className="pt-2">
-                            <button 
-                               onClick={() => handleQuoteClick(check.detected_content!)}
-                               className="text-left group flex flex-col gap-2 w-full"
-                            >
-                               <div className="flex items-center gap-2">
-                                 <div className={`p-1 rounded-full ${isRejected ? 'bg-slate-100 text-slate-400' : 'bg-orange-50 text-orange-400'}`}>
-                                    <Search size={12} />
-                                 </div>
-                                 <span className={`text-xs font-bold block ${isRejected ? 'text-slate-500' : 'text-orange-700'}`}>定位当时语境 (相关话题)：</span>
-                               </div>
-                               
-                               <span className={`text-xs block italic leading-relaxed p-2 rounded border ${isRejected ? 'text-slate-400 bg-slate-50 border-slate-100' : 'text-orange-600 bg-white/50 border-orange-100/50'}`}>
-                                 "{check.detected_content}"
-                               </span>
-                            </button>
-                          </div>
-                        )}
-                      </div>
-
-                      {/* NEW MODULE: MANUAL REVIEW */}
-                      <ManualReviewBlock 
-                        status={check.reviewStatus}
-                        comment={check.operatorComment || ''}
-                        onConfirm={() => updateReviewStatus('mandatory', sourceIndex, 'approved')}
-                        onReject={() => updateReviewStatus('mandatory', sourceIndex, 'rejected')}
-                        onCommentChange={(val) => updateReviewStatus('mandatory', sourceIndex, 'approved', val)}
-                        onResetStatus={() => updateReviewStatus('mandatory', sourceIndex, 'pending', '')}
-                      />
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-
-             {/* Passed Items */}
-             <div id="mandatory-passed-section" className="bg-slate-50 rounded-xl border border-slate-200 overflow-hidden break-inside-avoid">
-              <div className="bg-slate-100 px-5 py-2 border-b border-slate-200">
-                 <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider flex items-center gap-2">
-                   <ThumbsUp size={14} className="text-blue-600"/>
-                   已达标 ({passedMandatory.length})
-                 </h4>
-              </div>
-              {passedMandatory.length === 0 ? (
-                <div className="p-4 text-center text-slate-400 text-xs">无达标项</div>
-              ) : (
-                <div className="divide-y divide-slate-100">
-                  {passedMandatory.map((check, idx) => (
-                    <div key={idx} className="px-5 py-3 flex items-start gap-3">
-                      <div className="mt-0.5 text-blue-500 shrink-0">
-                        <Check size={14} strokeWidth={3} />
-                      </div>
-                      <div className="flex-1">
-                        <span className="text-sm text-slate-700 font-bold block">{check.standard}</span>
-                      </div>
-                    </div>
-                  ))}
+        {/* 左侧：质检报告 - 始终保持 420px 左右的手机宽度 */}
+        <div 
+          id="report-content" 
+          ref={reportRef} 
+          className={`bg-white transition-all duration-500 shadow-xl rounded-2xl overflow-hidden w-full max-w-[600px] shrink-0 p-8 md:p-10 min-h-screen`}
+        >
+          {/* METADATA HEADER */}
+          <div className="mb-8 border-b-2 border-slate-900 pb-6">
+             <div className="flex justify-between items-end mb-4">
+                <h1 className="text-3xl font-black text-slate-900">直播质检报告</h1>
+                {result.isDualMode && (
+                   <span className={`px-3 py-1 rounded-full text-xs font-bold text-white ${activeRound === 'round1' ? 'bg-blue-600' : 'bg-indigo-600'}`}>
+                     {activeRound === 'round1' ? '第一轮 (Round 1)' : '第二轮 (Round 2)'}
+                   </span>
+                )}
+             </div>
+             
+             <div className="bg-slate-50 rounded-xl p-5 border border-slate-200">
+                <div className="flex items-center gap-3">
+                   <div className="bg-white p-2 rounded-full border border-slate-200 text-slate-500">
+                      <User size={18} />
+                   </div>
+                   <div>
+                     <p className="text-[9px] text-slate-400 font-bold uppercase">主播</p>
+                     <p className="font-bold text-slate-800 text-lg">{metadata.anchorName || '未命名'}</p>
+                   </div>
                 </div>
-              )}
-            </div>
+             </div>
           </div>
 
-          <hr className="border-slate-100" />
+          <div className="space-y-12 animate-in fade-in duration-300" key={activeRound}>
+            {/* --- 新增：漏讲警报环节 (Omission Alarm UI) --- */}
+            {(missedMandatory.length > 0 || currentResult.forbidden_issues.length > 0) && (
+              <div className="bg-red-50 border-2 border-red-200 rounded-2xl p-6 shadow-sm">
+                <div className="flex items-center gap-3 mb-6">
+                  <div className="bg-red-600 p-2 rounded-lg text-white shadow-md">
+                    <AlertOctagon size={24} />
+                  </div>
+                  <div>
+                    <h3 className="text-xl font-black text-red-900">漏讲警报 (Omission Alarm)</h3>
+                    <p className="text-sm text-red-700 font-medium">系统已自动拎出所有不合格项，请优先处理</p>
+                  </div>
+                </div>
 
-          {/* SECTION 2: FORBIDDEN */}
-          <div>
-            <div className="flex items-center gap-3 mb-6 border-b border-slate-100 pb-4">
-              <div className="bg-red-100 p-2 rounded-lg text-red-600">
-                <Ban size={24} />
-              </div>
-              <div>
-                <h3 className="text-xl font-black text-slate-900">一定不能讲</h3>
-                <p className="text-sm text-slate-500 font-medium">
-                  {currentResult.forbidden_issues.length > 0 
-                    ? `发现 ${currentResult.forbidden_issues.length} 处违规` 
-                    : "本项检测全部通过"}
-                </p>
-              </div>
-            </div>
+                <div className="space-y-6">
+                  {/* 必查项漏讲 */}
+                  {missedMandatory.map((check, idx) => {
+                    const sourceIndex = activeRound === 'round1' 
+                      ? localResult.round1.mandatory_checks.indexOf(check)
+                      : (localResult.round2?.mandatory_checks.indexOf(check) ?? -1);
+                    const isRejected = check.reviewStatus === 'rejected';
+                    if (isRejected) return null;
 
-            {/* Violations */}
-            {currentResult.forbidden_issues.length > 0 && (
-              <div className="space-y-6 mb-8">
-                {currentResult.forbidden_issues.map((issue, idx) => {
-                  const sourceIndex = activeRound === 'round1'
-                     ? localResult.round1.forbidden_issues.indexOf(issue)
-                     : (localResult.round2?.forbidden_issues.indexOf(issue) ?? -1);
-
-                  const isRejected = issue.reviewStatus === 'rejected';
-
-                  return (
-                    <div 
-                      key={idx} 
-                      className={`issue-card bg-white rounded-2xl border-2 overflow-hidden relative break-inside-avoid shadow-sm flex flex-col ${
-                        isRejected ? 'border-slate-200 opacity-50 grayscale' : 'border-red-100'
-                      }`}
-                      data-review-status={issue.reviewStatus || 'pending'}
-                      data-comment={issue.operatorComment || ''}
-                    >
-                      <div className={`text-white px-5 py-3 flex items-center justify-between transition-colors ${isRejected ? 'bg-slate-400' : 'bg-red-600'}`}>
-                         <div className="flex items-center gap-2">
-                            {isRejected ? <Trash2 size={18} /> : <AlertOctagon size={18} className="text-red-200" />}
-                            <span className="font-bold text-base tracking-wide">
-                               {isRejected ? '已标记误诊/忽略' : `违规警报 #${idx + 1}`}
-                            </span>
-                         </div>
-                      </div>
-                      
-                      <div className={`p-5 space-y-4 flex-1 ${isRejected ? 'pointer-events-none' : ''}`}>
-                        <div>
-                          <p className={`text-xs font-bold uppercase tracking-wider mb-1 ${isRejected ? 'text-slate-400' : 'text-red-400'}`}>触犯规则</p>
-                          <h4 className="text-lg font-black text-slate-800 leading-snug whitespace-pre-wrap break-words">
-                            {issue.standard}
-                          </h4>
+                    return (
+                      <div 
+                        key={`alarm-m-${idx}`} 
+                        className="bg-white rounded-xl border border-red-100 overflow-hidden shadow-sm flex flex-col"
+                      >
+                        <div className="bg-orange-500 text-white px-4 py-2 flex items-center gap-2">
+                          <AlertTriangle size={16} />
+                          <span className="font-bold text-xs uppercase tracking-wider">必查项漏讲</span>
                         </div>
-
-                        <div className={`rounded-xl p-4 border ${isRejected ? 'bg-slate-50 border-slate-200' : 'bg-red-50 border-red-100'}`}>
-                          <p className={`text-xs font-bold uppercase tracking-wider mb-2 ${isRejected ? 'text-slate-400' : 'text-red-400'}`}>主播原话</p>
+                        <div className="p-4">
+                          <h4 className="font-black text-slate-800 mb-2">{check.standard}</h4>
+                          <div className="bg-orange-50 rounded-lg p-3 text-sm text-slate-700 border border-orange-100 mb-3">
+                            <p className="text-[10px] font-bold text-orange-600 uppercase mb-1">专家诊断：</p>
+                            {check.comment}
+                          </div>
                           <button 
-                               onClick={() => handleQuoteClick(issue.detected_content)}
-                               className="text-left w-full group"
+                            onClick={() => {
+                              const el = document.getElementById(`mandatory-${idx}`);
+                              if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                            }}
+                            className="text-[10px] font-bold text-blue-600 hover:text-blue-800 flex items-center gap-1"
                           >
-                            <p className={`text-base font-medium leading-relaxed italic transition-colors ${isRejected ? 'text-slate-500' : 'text-slate-800 group-hover:text-red-600'}`}>
-                              “{issue.detected_content}”
-                              <span className={`inline-flex items-center ml-2 text-[10px] border px-2 py-0.5 rounded-full opacity-0 group-hover:opacity-100 transition-opacity ${isRejected ? 'hidden' : 'bg-white border-red-200 text-red-600'}`}>
-                                   <ArrowDownCircle size={10} className="mr-0.5" /> 定位上下文
-                              </span>
-                            </p>
+                            查看详情并复核 <Search size={10} />
                           </button>
                         </div>
+                      </div>
+                    );
+                  })}
 
-                        <div className="grid grid-cols-2 gap-4 pt-2">
-                          <div className="space-y-1">
-                            <p className="text-xs font-bold text-slate-400 uppercase tracking-wider">错误原因</p>
-                            <p className="text-sm text-slate-600 font-medium leading-relaxed">
-                              {issue.reason}
-                            </p>
+                  {/* 违规项警报 */}
+                  {currentResult.forbidden_issues.map((issue, idx) => {
+                    const isRejected = issue.reviewStatus === 'rejected';
+                    if (isRejected) return null;
+
+                    return (
+                      <div 
+                        key={`alarm-f-${idx}`} 
+                        className="bg-white rounded-xl border border-red-100 overflow-hidden shadow-sm flex flex-col"
+                      >
+                        <div className="bg-red-600 text-white px-4 py-2 flex items-center gap-2">
+                          <AlertOctagon size={16} />
+                          <span className="font-bold text-xs uppercase tracking-wider">违规内容警报</span>
+                        </div>
+                        <div className="p-4">
+                          <h4 className="font-black text-slate-800 mb-2">{issue.standard}</h4>
+                          <div className="bg-red-50 rounded-lg p-3 text-sm text-slate-700 border border-red-100 mb-3">
+                            <p className="text-[10px] font-bold text-red-600 uppercase mb-1">违规分析：</p>
+                            {issue.reason}
                           </div>
-                          <div className={`rounded-xl p-3 border ${isRejected ? 'bg-slate-50 border-slate-200' : 'bg-green-50 border-green-100'}`}>
-                            <p className={`text-xs font-bold uppercase tracking-wider mb-1 flex items-center gap-1 ${isRejected ? 'text-slate-500' : 'text-green-600'}`}>
-                               <Sparkles size={12} /> 建议调整
-                            </p>
-                            <p className={`text-sm font-bold leading-relaxed ${isRejected ? 'text-slate-600' : 'text-green-800'}`}>
-                              {issue.suggestion}
-                            </p>
-                          </div>
+                          <button 
+                            onClick={() => {
+                              const el = document.getElementById(`forbidden-${idx}`);
+                              if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                            }}
+                            className="text-[10px] font-bold text-blue-600 hover:text-blue-800 flex items-center gap-1"
+                          >
+                            查看详情并复核 <Search size={10} />
+                          </button>
                         </div>
                       </div>
-
-                      {/* NEW MODULE: MANUAL REVIEW */}
-                      <ManualReviewBlock 
-                        status={issue.reviewStatus}
-                        comment={issue.operatorComment || ''}
-                        onConfirm={() => updateReviewStatus('forbidden', sourceIndex, 'approved')}
-                        onReject={() => updateReviewStatus('forbidden', sourceIndex, 'rejected')}
-                        onCommentChange={(val) => updateReviewStatus('forbidden', sourceIndex, 'approved', val)}
-                        onResetStatus={() => updateReviewStatus('forbidden', sourceIndex, 'pending', '')}
-                      />
-                    </div>
-                  );
-                })}
+                    );
+                  })}
+                </div>
               </div>
             )}
 
-            <div id="forbidden-passed-section" className="bg-slate-50 rounded-xl border border-slate-200 overflow-hidden break-inside-avoid">
-              <div className="bg-slate-100 px-5 py-2 border-b border-slate-200">
-                 <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider flex items-center gap-2">
-                   <CheckCircle2 size={14} className="text-green-600"/>
-                   已通过 ({passedForbiddenRules.length})
-                 </h4>
+            {/* SECTION 1: MANDATORY */}
+            <div className="hidden"> {/* 默认隐藏全量必查项，通过警报专区处理异常 */}
+              <div className="flex items-center gap-3 mb-6 border-b border-slate-100 pb-4">
+                <div className="bg-blue-100 p-2 rounded-lg text-blue-600">
+                  <ClipboardList size={24} />
+                </div>
+                <div>
+                  <h3 className="text-xl font-black text-slate-900">一定要讲</h3>
+                  <p className="text-sm text-slate-500 font-medium">
+                    {missedMandatory.length > 0
+                     ? `警报：发现 ${missedMandatory.length} 处漏讲`
+                     : "关键点全部覆盖"}
+                  </p>
+                </div>
               </div>
-              {passedForbiddenRules.length === 0 ? (
-                <div className="p-4 text-center text-slate-400 text-xs">无其他通过项</div>
-              ) : (
-                <div className="grid grid-cols-2 gap-x-4 p-2">
-                  {passedForbiddenRules.map((rule, idx) => (
-                    <div key={idx} className="px-3 py-2 flex items-start gap-2">
-                      <div className="mt-0.5 text-green-500 shrink-0">
-                        <Check size={14} strokeWidth={3} />
+
+              {/* Missed Items */}
+              {missedMandatory.length > 0 && (
+                <div className="space-y-6 mb-8">
+                  {missedMandatory.map((check, idx) => {
+                     // Calculate real index source
+                     const sourceIndex = activeRound === 'round1' 
+                       ? localResult.round1.mandatory_checks.indexOf(check)
+                       : (localResult.round2?.mandatory_checks.indexOf(check) ?? -1);
+
+                     const isRejected = check.reviewStatus === 'rejected';
+
+                     return (
+                      <div 
+                        key={idx} 
+                        id={`mandatory-${idx}`} // 添加唯一 ID
+                        className={`issue-card bg-white rounded-2xl border-2 overflow-hidden relative break-inside-avoid shadow-sm flex flex-col ${
+                          isRejected ? 'border-slate-200 opacity-50 grayscale' : 'border-orange-100'
+                        }`}
+                        data-review-status={check.reviewStatus || 'pending'}
+                        data-comment={check.operatorComment || ''}
+                      >
+                        {/* HEADER */}
+                        <div className={`text-white px-5 py-3 flex items-center justify-between transition-colors ${isRejected ? 'bg-slate-400' : 'bg-orange-500'}`}>
+                           <div className="flex items-center gap-2">
+                              {isRejected ? <Trash2 size={18} /> : <AlertTriangle size={18} className="text-orange-100" />}
+                              <span className="font-bold text-base tracking-wide">
+                                {isRejected ? '已标记误诊/忽略' : `漏讲警报 #${idx + 1}`}
+                              </span>
+                           </div>
+                        </div>
+
+                        {/* CONTENT BODY */}
+                        <div className={`p-5 space-y-4 flex-1 ${isRejected ? 'pointer-events-none' : ''}`}>
+                          <div>
+                            <p className={`text-[9px] font-bold uppercase tracking-wider mb-1 ${isRejected ? 'text-slate-400' : 'text-orange-400'}`}>缺失内容</p>
+                            <h4 className="text-lg font-black text-slate-800 leading-snug whitespace-pre-wrap break-words">
+                              {check.standard}
+                            </h4>
+                          </div>
+
+                          <div className={`rounded-xl p-4 border relative ${isRejected ? 'bg-slate-50 border-slate-200' : 'bg-orange-50 border-orange-100'}`}>
+                            <p className={`text-[9px] font-bold uppercase tracking-wider mb-1 flex items-center gap-1 ${isRejected ? 'text-slate-500' : 'text-orange-600'}`}>
+                               <Sparkles size={12} /> 质检专家深度分析
+                            </p>
+                            <ExpandableText text={check.comment} maxLen={150} className="text-slate-800 font-medium" />
+                          </div>
+
+                          {check.topic_scene && check.topic_scene.length > 2 && (
+                            <div className="pt-2">
+                              <div className="flex flex-col gap-2 w-full">
+                                 <div className="flex items-center gap-2">
+                                   <div className={`p-1 rounded-full ${isRejected ? 'bg-slate-100 text-slate-400' : 'bg-orange-50 text-orange-400'}`}>
+                                      <Search size={12} />
+                                   </div>
+                                   <span className={`text-xs font-bold block ${isRejected ? 'text-slate-500' : 'text-orange-700'}`}>定位当时语境 (相关话题)：</span>
+                                 </div>
+                                 
+                                 <div 
+                                   onClick={() => handleQuoteClick(check.core_evidence || check.topic_scene || '', `mandatory-${idx}`)}
+                                   className={`text-xs cursor-pointer hover:border-blue-300 transition-colors p-3 rounded-xl border ${isRejected ? 'text-slate-400 bg-slate-50 border-slate-100' : 'bg-blue-50 border-blue-100'}`}
+                                 >
+                                   {renderDualColorText(check.topic_scene, check.core_evidence)}
+                                   <div className="mt-2 flex items-center gap-1 text-[10px] font-bold text-orange-400">
+                                     <ArrowDownCircle size={10} /> 点击跳转原文定位 (跳至核心原话)
+                                   </div>
+                                 </div>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* NEW MODULE: MANUAL REVIEW */}
+                        <ManualReviewBlock 
+                          status={check.reviewStatus}
+                          comment={check.operatorComment || ''}
+                          onConfirm={() => updateReviewStatus('mandatory', sourceIndex, 'approved')}
+                          onReject={() => updateReviewStatus('mandatory', sourceIndex, 'rejected')}
+                          onCommentChange={(val) => updateReviewStatus('mandatory', sourceIndex, 'approved', val)}
+                          onResetStatus={() => updateReviewStatus('mandatory', sourceIndex, 'pending', '')}
+                        />
                       </div>
-                      <span className="text-xs text-slate-600 font-medium leading-tight">
-                        {rule.qaFocus || rule.content}
-                      </span>
-                    </div>
-                  ))}
+                    );
+                  })}
+            </div>
+            )}
+
+            {/* --- 新增：精准分割锚点核对区 --- */}
+            {result.isDualMode && result.splitAnchors && (
+              <div className="my-10 p-6 bg-indigo-50 rounded-2xl border-2 border-indigo-100 shadow-sm animate-in fade-in slide-in-from-bottom-4 duration-500">
+                <div className="flex items-center gap-2 mb-4">
+                  <div className="bg-indigo-600 p-1.5 rounded text-white shadow-sm">
+                    <Split size={16} />
+                  </div>
+                  <h4 className="text-sm font-black text-indigo-900 uppercase tracking-wider">双轮切割定位核对 (精准坐标)</h4>
+                </div>
+                
+                <div className="grid grid-cols-2 gap-3">
+                  <button 
+                    onClick={() => handleQuoteClick(result.splitAnchors!.r1StartPhrase, 'anchor-r1-start')}
+                    className="flex flex-col items-start p-3 bg-white border border-indigo-200 rounded-xl hover:border-indigo-400 hover:shadow-md transition-all text-left group"
+                  >
+                    <span className="text-[9px] font-bold text-indigo-400 uppercase mb-1">1. 第一轮开始点</span>
+                    <span className="text-xs font-bold text-indigo-900 truncate w-full group-hover:text-blue-600 transition-colors">“{result.splitAnchors!.r1StartPhrase}”</span>
+                  </button>
+
+                  <button 
+                    onClick={() => handleQuoteClick(result.splitAnchors!.r1EndPhrase, 'anchor-r1-end')}
+                    className="flex flex-col items-start p-3 bg-white border border-indigo-200 rounded-xl hover:border-indigo-400 hover:shadow-md transition-all text-left group"
+                  >
+                    <span className="text-[9px] font-bold text-indigo-400 uppercase mb-1">2. 第一轮结束点</span>
+                    <span className="text-xs font-bold text-indigo-900 truncate w-full group-hover:text-blue-600 transition-colors">“{result.splitAnchors!.r1EndPhrase}”</span>
+                  </button>
+
+                  <button 
+                    onClick={() => handleQuoteClick(result.splitAnchors!.r2StartPhrase, 'anchor-r2-start')}
+                    className="flex flex-col items-start p-3 bg-indigo-600 border border-indigo-700 rounded-xl hover:bg-indigo-700 shadow-lg hover:shadow-indigo-200 transition-all text-left group"
+                  >
+                    <span className="text-[9px] font-bold text-indigo-200 uppercase mb-1">3. 第二轮开启点 (核心)</span>
+                    <span className="text-xs font-bold text-white truncate w-full">“{result.splitAnchors!.r2StartPhrase}”</span>
+                  </button>
+
+                  <button 
+                    onClick={() => handleQuoteClick(result.splitAnchors!.r2EndPhrase, 'anchor-r2-end')}
+                    className="flex flex-col items-start p-3 bg-white border border-indigo-200 rounded-xl hover:border-indigo-400 hover:shadow-md transition-all text-left group"
+                  >
+                    <span className="text-[9px] font-bold text-indigo-400 uppercase mb-1">4. 第二轮结束点</span>
+                    <span className="text-xs font-bold text-indigo-900 truncate w-full group-hover:text-blue-600 transition-colors">“{result.splitAnchors!.r2EndPhrase}”</span>
+                  </button>
+                </div>
+                <p className="mt-3 text-[10px] text-indigo-400 font-bold text-center flex items-center justify-center gap-1">
+                   <ArrowDownCircle size={10} /> 点击上方按钮，直接在底部“逐字稿”中高亮定位并标黄
+                </p>
+              </div>
+            )}
+
+            {/* Passed Items */}
+               <div id="mandatory-passed-section" className="bg-slate-50 rounded-xl border border-slate-200 overflow-hidden break-inside-avoid">
+                <div className="bg-slate-100 px-5 py-2 border-b border-slate-200">
+                   <h4 className="text-[9px] font-bold text-slate-500 uppercase tracking-wider flex items-center gap-2">
+                     <ThumbsUp size={14} className="text-blue-600"/>
+                     已达标 ({passedMandatory.length})
+                   </h4>
+                </div>
+                {passedMandatory.length === 0 ? (
+                  <div className="p-4 text-center text-slate-400 text-xs">无达标项</div>
+                ) : (
+                  <div className="divide-y divide-slate-100">
+                    {passedMandatory.map((check, idx) => (
+                      <div key={idx} className="px-5 py-3 flex items-start gap-3">
+                        <div className="mt-0.5 text-blue-500 shrink-0">
+                          <Check size={14} strokeWidth={3} />
+                        </div>
+                        <div className="flex-1">
+                          <span className="text-sm text-slate-700 font-bold block">{check.standard}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <hr className="border-slate-100" />
+
+            {/* SECTION 2: FORBIDDEN */}
+            <div className="hidden"> {/* 默认隐藏全量违规项，通过警报专区处理异常 */}
+              <div className="flex items-center gap-3 mb-6 border-b border-slate-100 pb-4">
+                <div className="bg-red-100 p-2 rounded-lg text-red-600">
+                  <Ban size={24} />
+                </div>
+                <div>
+                  <h3 className="text-xl font-black text-slate-900">一定不能讲</h3>
+                  <p className="text-sm text-slate-500 font-medium">
+                    {currentResult.forbidden_issues.length > 0 
+                      ? `发现 ${currentResult.forbidden_issues.length} 处违规` 
+                      : "本项检测全部通过"}
+                  </p>
+                </div>
+              </div>
+
+              {/* Violations */}
+              {currentResult.forbidden_issues.length > 0 && (
+                <div className="space-y-6 mb-8">
+                  {currentResult.forbidden_issues.map((issue, idx) => {
+                    const sourceIndex = activeRound === 'round1'
+                       ? localResult.round1.forbidden_issues.indexOf(issue)
+                       : (localResult.round2?.forbidden_issues.indexOf(issue) ?? -1);
+
+                    const isRejected = issue.reviewStatus === 'rejected';
+
+                    return (
+                      <div 
+                        key={idx} 
+                        id={`forbidden-${idx}`} // 添加唯一 ID
+                        className={`issue-card bg-white rounded-2xl border-2 overflow-hidden relative break-inside-avoid shadow-sm flex flex-col ${
+                          isRejected ? 'border-slate-200 opacity-50 grayscale' : 'border-red-100'
+                        }`}
+                        data-review-status={issue.reviewStatus || 'pending'}
+                        data-comment={issue.operatorComment || ''}
+                      >
+                        <div className={`text-white px-5 py-3 flex items-center justify-between transition-colors ${isRejected ? 'bg-slate-400' : 'bg-red-600'}`}>
+                           <div className="flex items-center gap-2">
+                              {isRejected ? <Trash2 size={18} /> : <AlertOctagon size={18} className="text-red-200" />}
+                              <span className="font-bold text-base tracking-wide">
+                                 {isRejected ? '已标记误诊/忽略' : `违规警报 #${idx + 1}`}
+                              </span>
+                           </div>
+                        </div>
+                        
+                        <div className={`p-5 space-y-4 flex-1 ${isRejected ? 'pointer-events-none' : ''}`}>
+                          <div>
+                            <p className={`text-[9px] font-bold uppercase tracking-wider mb-1 ${isRejected ? 'text-slate-400' : 'text-red-400'}`}>触犯规则</p>
+                            <h4 className="text-lg font-black text-slate-800 leading-snug whitespace-pre-wrap break-words">
+                              {issue.standard}
+                            </h4>
+                          </div>
+
+                          <div className={`rounded-xl p-4 border ${isRejected ? 'bg-slate-50 border-slate-200' : 'bg-red-50 border-red-100'}`}>
+                            <p className={`text-[9px] font-bold uppercase tracking-wider mb-2 ${isRejected ? 'text-slate-400' : 'text-red-400'}`}>违规现场证据 (主播原话)</p>
+                            <div 
+                                 onClick={() => handleQuoteClick(issue.detected_content, `forbidden-${idx}`)}
+                                 className="text-left w-full cursor-pointer group"
+                            >
+                              <ExpandableText text={`“${issue.detected_content}”`} maxLen={100} italic={true} className={`${isRejected ? 'text-slate-500' : 'text-slate-800 group-hover:text-red-600'}`} />
+                              <div className={`mt-2 flex items-center gap-1 text-[10px] font-bold ${isRejected ? 'hidden' : 'text-red-400'}`}>
+                                 <ArrowDownCircle size={10} /> 点击跳转原文定位
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="space-y-4 pt-2">
+                            <div className="space-y-1">
+                              <p className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">质检专家深度分析</p>
+                              <ExpandableText text={issue.reason} maxLen={150} className="text-slate-600 font-medium" />
+                            </div>
+                            <div className={`rounded-xl p-4 border ${isRejected ? 'bg-slate-50 border-slate-200' : 'bg-green-50 border-green-100'}`}>
+                              <p className={`text-[9px] font-bold uppercase tracking-wider mb-1 flex items-center gap-1 ${isRejected ? 'text-slate-500' : 'text-green-600'}`}>
+                                 <Sparkles size={12} /> 纠偏建议
+                              </p>
+                              <p className={`text-sm font-bold leading-relaxed ${isRejected ? 'text-slate-600' : 'text-green-800'}`}>
+                                {issue.suggestion}
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* NEW MODULE: MANUAL REVIEW */}
+                        <ManualReviewBlock 
+                          status={issue.reviewStatus}
+                          comment={issue.operatorComment || ''}
+                          onConfirm={() => updateReviewStatus('forbidden', sourceIndex, 'approved')}
+                          onReject={() => updateReviewStatus('forbidden', sourceIndex, 'rejected')}
+                          onCommentChange={(val) => updateReviewStatus('forbidden', sourceIndex, 'approved', val)}
+                          onResetStatus={() => updateReviewStatus('forbidden', sourceIndex, 'pending', '')}
+                        />
+                      </div>
+                    );
+                  })}
                 </div>
               )}
+
+              <div id="forbidden-passed-section" className="bg-slate-50 rounded-xl border border-slate-200 overflow-hidden break-inside-avoid">
+                <div className="bg-slate-100 px-5 py-2 border-b border-slate-200">
+                   <h4 className="text-[9px] font-bold text-slate-500 uppercase tracking-wider flex items-center gap-2">
+                     <CheckCircle2 size={14} className="text-green-600"/>
+                     已通过 ({passedForbiddenRules.length})
+                   </h4>
+                </div>
+                {passedForbiddenRules.length === 0 ? (
+                  <div className="p-4 text-center text-slate-400 text-xs">无其他通过项</div>
+                ) : (
+                  <div className="grid grid-cols-2 gap-x-4 p-2">
+                    {passedForbiddenRules.map((rule, idx) => (
+                      <div key={idx} className="px-3 py-2 flex items-start gap-2">
+                        <div className="mt-0.5 text-green-500 shrink-0">
+                          <Check size={14} strokeWidth={3} />
+                        </div>
+                        <span className="text-xs text-slate-600 font-medium leading-tight">
+                          {rule.qaFocus || rule.content}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
           </div>
-        </div>
-        
-        <div id="transcript-section" className="mt-16 pt-10 border-t-4 border-slate-200 animate-in fade-in duration-700">
-          <div className="flex items-center gap-2 mb-6">
-            <div className="bg-slate-200 p-2 rounded-lg text-slate-700">
-               <FileText size={20} />
+          
+          <div id="transcript-section" className="mt-16 pt-10 border-t-4 border-slate-200 animate-in fade-in duration-700">
+            <div className="flex items-center gap-2 mb-6">
+              <div className="bg-slate-200 p-2 rounded-lg text-slate-700">
+                 <FileText size={20} />
+              </div>
+              <div>
+                 <h3 className="text-xl font-black text-slate-900">逐字稿复盘</h3>
+                 <p className="text-sm text-slate-500">
+                   {highlightQuote 
+                     ? "已定位至选中原话，背景高亮显示" 
+                     : "点击上方报告中的“主播原话”可快速定位"}
+                 </p>
+              </div>
             </div>
-            <div>
-               <h3 className="text-xl font-black text-slate-900">逐字稿复盘</h3>
-               <p className="text-sm text-slate-500">
-                 {highlightQuote 
-                   ? "已定位至选中原话，背景高亮显示" 
-                   : "点击上方报告中的“主播原话”可快速定位"}
-               </p>
+            <div ref={transcriptRef} className="bg-slate-50 rounded-xl p-6 md:p-8 font-mono text-sm leading-loose text-slate-600 border border-slate-200 whitespace-pre-wrap relative">
+               {renderHighlightedTranscript()}
             </div>
           </div>
-          <div ref={transcriptRef} className="bg-slate-50 rounded-xl p-6 md:p-8 font-mono text-sm leading-loose text-slate-600 border border-slate-200 whitespace-pre-wrap relative">
-             {renderHighlightedTranscript()}
+
+          <div className="mt-12 pt-6 border-t border-slate-100 text-center text-slate-400 text-xs font-mono">
+            StreamScript QA 智能质检 • {new Date().toLocaleDateString()}
           </div>
         </div>
 
-        <div className="mt-12 pt-6 border-t border-slate-100 text-center text-slate-400 text-xs font-mono">
-          StreamScript QA 智能质检 • {new Date().toLocaleDateString()}
+      {/* 4. 核对台面板 - 调整高度为 3 倍并允许拉伸 */}
+      {showAdminAudit && (
+        <div className="flex-1 min-w-[600px] sticky top-[80px] min-h-[1800px] flex flex-col animate-in slide-in-from-right-10 duration-500 print:hidden">
+          <div className="bg-white rounded-2xl border-2 border-orange-200 shadow-2xl overflow-hidden flex flex-col min-h-[1800px]">
+            <div className="bg-orange-500 p-4 text-white flex justify-between items-center shrink-0">
+              <div className="flex items-center gap-2">
+                <Activity size={18} />
+                <h3 className="font-bold">AI 案发现场 (指令核对)</h3>
+              </div>
+              <button onClick={() => setShowAdminAudit(false)} className="hover:rotate-90 transition-transform">
+                <XCircleIcon size={20} />
+              </button>
+            </div>
+            <div className="flex-1 overflow-hidden">
+              <AdminAuditView 
+                result={localResult} 
+                onBack={() => setShowAdminAudit(false)} 
+                isSidebar={true} 
+                externalRound={activeRound}
+                onRoundChange={setActiveRound}
+              />
+            </div>
+          </div>
         </div>
+      )}
       </div>
       
       <button
-        onClick={scrollToTop}
+        onClick={() => {
+          if (lastClickedId) {
+            const el = document.getElementById(lastClickedId);
+            if (el) {
+              el.scrollIntoView({ behavior: 'auto', block: 'center' });
+              setLastClickedId(null); // 回去后清空，下次点击再触发
+              return;
+            }
+          }
+          scrollToTop();
+        }}
         className={`fixed bottom-10 right-10 z-50 flex items-center gap-2 bg-slate-800 hover:bg-blue-600 text-white px-5 py-3 rounded-full shadow-2xl transition-all duration-300 transform font-bold print:hidden ${
           showBackToTop ? 'translate-y-0 opacity-100' : 'translate-y-24 opacity-0 pointer-events-none'
         }`}
       >
-        <ArrowUp size={20} strokeWidth={3} />
-        <span>回到顶部</span>
+        {lastClickedId ? <Undo2 size={20} strokeWidth={3} /> : <ArrowUp size={20} strokeWidth={3} />}
+        <span>{lastClickedId ? "回到原处" : "回到顶部"}</span>
       </button>
 
     </div>
