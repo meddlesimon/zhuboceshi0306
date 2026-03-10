@@ -41,98 +41,70 @@ interface ReportViewProps {
   onReset: () => void;
 }
 
+
+
+const parseDiagnosisLines = (text: string) => {
+  if (!text) return { score: 0, elements: [] };
+  const lines = text.split('\n');
+  const elements: any[] = [];
+  let overallScore = 0;
+
+  lines.forEach(line => {
+    // 1. 匹配综合得分：兼容 [50分]、50 分、[50]分 以及中英文冒号
+    const scoreMatch = line.match(/综合得分[：:]?\s*[\[\(]?(\d+)[\]\)]?\s*分?/);
+    if (scoreMatch) {
+      overallScore = parseInt(scoreMatch[1]);
+      return;
+    }
+
+    // 2. 匹配核心要素：兼容各种括号、冒号和连接符变体
+    // 模式：要素 X [名称]：[得分] —— 评语
+    const match = line.match(/要素\s*(\d+)\s*[\[\(]?(.*?)[\]\)]?[：:]\s*[\[\(]?(.*?)[\]\)]?\s*[——-]\s*(.*)/);
+    if (match) {
+      const [_, id, name, score, desc] = match;
+      const scores = score.split('/').map(n => parseInt(n));
+      elements.push({
+        id,
+        name,
+        score,
+        description: desc,
+        isFailed: (scores.length > 0 && scores[0] === 0) || score.includes('0分')
+      });
+    }
+  });
+
+  return { score: overallScore, elements };
+};
+
 /**
- * Manual Review Input Block
+ * 诊断结果结构化展示组件 - 高密度组件 (v3.0 Pixel Perfect)
  */
-const ManualReviewBlock: React.FC<{
-  status: 'approved' | 'rejected' | 'pending' | undefined;
-  comment: string;
-  onConfirm: () => void;
-  onReject: () => void;
-  onCommentChange: (val: string) => void;
-  onResetStatus: () => void;
-}> = ({ status, comment, onConfirm, onReject, onCommentChange, onResetStatus }) => {
-  const isApproved = status === 'approved';
-  const isRejected = status === 'rejected';
+const DiagnosisDisplay: React.FC<{ score: number, elements: any[], isRejected?: boolean }> = ({ score, elements, isRejected = false }) => {
+  if (!elements || elements.length === 0) return null;
 
   return (
-    <div className="bg-slate-50 border-t border-slate-100 p-4 mt-auto">
-      <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-2">
-           <div className="bg-slate-200 text-slate-600 p-1 rounded">
-             <PenLine size={14} />
-           </div>
-           <span className="text-xs font-bold text-slate-700 uppercase tracking-wider">人工手检 (Manual Review)</span>
-        </div>
-        
-        {/* Status Label (if decided) */}
-        {isApproved && (
-           <span className="text-xs font-bold text-green-600 flex items-center gap-1 bg-green-50 px-2 py-1 rounded border border-green-100">
-             <CheckCircle2 size={12} /> 已确认保留
-           </span>
-        )}
-        {isRejected && (
-           <span className="text-xs font-bold text-slate-500 flex items-center gap-1 bg-slate-100 px-2 py-1 rounded border border-slate-200">
-             <XCircle size={12} /> 已标记误诊
-           </span>
-        )}
+    <div className={`space-y-2 ${isRejected ? 'opacity-50 grayscale' : ''}`}>
+      {/* 综合得分 */}
+      <div className="flex justify-between items-center bg-white px-3 py-1.5 rounded-lg border border-red-100/50 shadow-sm">
+        <span className="text-[10px] font-bold text-red-800">综合判定得分</span>
+        <span className="text-lg font-black text-red-600">{score} 分</span>
       </div>
-
-      {/* Action Buttons */}
-      {!isApproved && !isRejected && (
-        <div className="flex gap-3">
-          <button 
-            onClick={onConfirm}
-            className="flex-1 bg-white hover:bg-green-50 border border-slate-200 hover:border-green-300 text-slate-600 hover:text-green-700 py-2.5 rounded-lg text-xs font-bold transition-all shadow-sm flex items-center justify-center gap-2"
-          >
-            <CheckCircle2 size={16} />
-            确认保留 (需填写)
-          </button>
-          <button 
-            onClick={onReject}
-            className="flex-1 bg-white hover:bg-slate-100 border border-slate-200 hover:border-slate-300 text-slate-400 hover:text-slate-600 py-2.5 rounded-lg text-xs font-bold transition-all shadow-sm flex items-center justify-center gap-2"
-          >
-            <XCircle size={16} />
-            点击误诊 (不导出)
-          </button>
-        </div>
-      )}
-
-      {/* Approved State: Input Box */}
-      {isApproved && (
-        <div className="animate-in fade-in slide-in-from-top-2 duration-300">
-          <textarea 
-            value={comment}
-            onChange={(e) => onCommentChange(e.target.value)}
-            placeholder="请输入人工复核意见（必填，将显示在报告中）..."
-            className="w-full text-sm p-3 rounded-lg border border-green-200 focus:border-green-400 focus:ring-2 focus:ring-green-100 outline-none h-20 resize-none bg-white text-slate-800 placeholder:text-slate-400 mb-2"
-            autoFocus
-          />
-          <div className="flex justify-between items-center">
-             <span className="text-[10px] text-green-600 font-medium">
-               * 此内容将导出至 PDF
-             </span>
-             <button 
-               onClick={onResetStatus}
-               className="text-xs text-slate-400 underline hover:text-slate-600"
-             >
-               重新选择
-             </button>
+      
+      {/* 要素明细列表 */}
+      <div className="divide-y divide-red-100/30 bg-white/80 rounded-lg px-2 py-0.5 shadow-sm">
+        {elements.map((el, i) => (
+          <div key={i} className="py-2">
+            <div className="flex justify-between items-center mb-0.5">
+              <span className="text-[11px] font-bold text-gray-800 flex items-center gap-1.5">
+                 <i className="w-3.5 h-3.5 bg-red-100 text-red-600 rounded-sm flex items-center justify-center text-[9px] not-italic font-black">{el.id}</i>
+                 {el.name}
+              </span>
+              <span className="text-[9px] font-bold text-red-600 font-mono">{el.score}</span>
+            </div>
+            <p className="text-[10px] text-gray-500 pl-[22px] leading-tight">{el.description}</p>
           </div>
-        </div>
-      )}
-
-      {/* Rejected State: Undo Button */}
-      {isRejected && (
-        <div className="flex justify-end animate-in fade-in">
-           <button 
-             onClick={onResetStatus}
-             className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 bg-blue-50 px-3 py-1.5 rounded hover:bg-blue-100 transition-colors"
-           >
-             <Undo2 size={12} /> 撤销误诊操作
-           </button>
-        </div>
-      )}
+        ))}
+      </div>
     </div>
   );
 };
@@ -860,32 +832,116 @@ const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, on
                       ? localResult.round1.mandatory_checks.indexOf(check)
                       : (localResult.round2?.mandatory_checks.indexOf(check) ?? -1);
                     const isRejected = check.reviewStatus === 'rejected';
-                    if (isRejected) return null;
+                    const isApproved = check.reviewStatus === 'approved';
 
                     return (
                       <div 
                         key={`alarm-m-${idx}`} 
-                        className="bg-white rounded-xl border border-red-100 overflow-hidden shadow-sm flex flex-col"
+                        id={`alarm-m-${idx}`}
+                        className={`bg-white rounded-2xl border overflow-hidden shadow-sm flex flex-col transition-all duration-300 relative ${
+                          isRejected ? 'border-slate-200 grayscale opacity-60' : 'border-red-100'
+                        }`}
+                        data-review-status={check.reviewStatus || 'pending'}
+                        data-comment={check.operatorComment || ''}
                       >
-                        <div className="bg-orange-500 text-white px-4 py-2 flex items-center gap-2">
-                          <AlertTriangle size={16} />
-                          <span className="font-bold text-xs uppercase tracking-wider">必查项漏讲</span>
-                        </div>
-                        <div className="p-4">
-                          <h4 className="font-black text-slate-800 mb-2">{check.standard}</h4>
-                          <div className="bg-orange-50 rounded-lg p-3 text-sm text-slate-700 border border-orange-100 mb-3">
-                            <p className="text-[10px] font-bold text-orange-600 uppercase mb-1">专家诊断：</p>
-                            {check.comment}
+                        {/* 误诊水印 */}
+                        {isRejected && (
+                          <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none">
+                            <div className="bg-slate-800/80 text-white text-[10px] font-black px-4 py-1.5 rounded-full uppercase tracking-widest shadow-lg transform -rotate-12 border border-slate-600">
+                              已标记为误诊 · 不会导出
+                            </div>
                           </div>
-                          <button 
-                            onClick={() => {
-                              const el = document.getElementById(`mandatory-${idx}`);
-                              if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                            }}
-                            className="text-[10px] font-bold text-blue-600 hover:text-blue-800 flex items-center gap-1"
-                          >
-                            查看详情并复核 <Search size={10} />
-                          </button>
+                        )}
+
+                        {/* 1. 卡片头部 */}
+                        <div className={`px-4 py-2 flex justify-between items-center transition-colors ${isRejected ? 'bg-slate-400' : 'bg-red-600'}`}>
+                          <div className="flex items-center gap-2">
+                            <span className="w-1.5 h-1.5 bg-white rounded-full animate-pulse"></span>
+                            <h1 className="text-white text-[11px] font-black tracking-widest uppercase">漏讲警报 #{idx + 1}</h1>
+                          </div>
+                          <div className="bg-white/20 backdrop-blur-md border border-white/20 px-2 py-0.5 rounded text-[9px] text-white font-bold">
+                            MANDATORY
+                          </div>
+                        </div>
+                        
+                        <div className="p-4 space-y-4">
+                          {/* 2. 质检重点 */}
+                          <div>
+                            <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-1 flex items-center gap-1">
+                              <ClipboardList size={10} /> 质检重点
+                            </p>
+                            <h4 className="font-bold text-[13px] text-slate-800 leading-snug">
+                              {check.standard}
+                            </h4>
+                          </div>
+
+                          {/* 3. 深度诊断区 */}
+                          <div className="bg-red-50/40 rounded-xl p-3 border border-red-100/50">
+                            {(() => {
+                              const { score, elements } = parseDiagnosisLines(check.comment);
+                              return elements.length > 0 ? (
+                                <DiagnosisDisplay score={score} elements={elements} isRejected={isRejected} />
+                              ) : (
+                                <p className="text-[11px] text-red-800 leading-relaxed italic">{check.comment}</p>
+                              );
+                            })()}
+                          </div>
+
+                          {/* 4. 主播当时原话 (点击定位) */}
+                          {check.detected_content && (
+                            <div 
+                              onClick={() => handleQuoteClick(check.detected_content!, `alarm-m-${idx}`)}
+                              className="bg-blue-50 border border-blue-100 rounded-xl p-3 cursor-pointer hover:bg-blue-100 transition-all active:scale-[0.98] group"
+                            >
+                              <p className="text-[9px] font-black text-blue-400 uppercase tracking-widest mb-1.5 flex justify-between items-center">
+                                <span className="flex items-center gap-1"><Search size={10} /> 主播当时原话 (点击定位)</span>
+                                <ArrowDownCircle size={10} className="group-hover:translate-y-0.5 transition-transform" />
+                              </p>
+                              <p className="text-blue-900 text-[12px] leading-relaxed italic font-medium">
+                                “{check.detected_content}”
+                              </p>
+                            </div>
+                          )}
+
+                          {/* 5. 人工手检模块 */}
+                          <div className="pt-2 border-t border-slate-100">
+                             <div className="flex gap-2">
+                               <button 
+                                 onClick={() => updateReviewStatus('mandatory', sourceIndex, 'approved')}
+                                 className={`flex-1 py-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all ${
+                                   isApproved 
+                                   ? 'bg-emerald-600 text-white shadow-md' 
+                                   : 'bg-emerald-50 text-emerald-700 border border-emerald-100 hover:bg-emerald-100'
+                                 }`}
+                               >
+                                  <CheckCircle2 size={12} />
+                                  判定正确 (保留)
+                               </button>
+                               <button 
+                                 onClick={() => updateReviewStatus('mandatory', sourceIndex, isRejected ? 'pending' : 'rejected')}
+                                 className={`flex-1 py-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all ${
+                                   isRejected
+                                   ? 'bg-slate-600 text-white shadow-md'
+                                   : 'bg-slate-50 text-slate-400 border border-slate-200 hover:bg-red-50 hover:text-red-500 hover:border-red-100'
+                                 }`}
+                               >
+                                  <AlertOctagon size={12} />
+                                  {isRejected ? '撤销误诊' : '点击误诊 (排除)'}
+                               </button>
+                             </div>
+                             
+                             {/* 人工备注输入框 */}
+                             {isApproved && (
+                               <div className="mt-2 animate-in fade-in slide-in-from-top-1 duration-300">
+                                  <textarea 
+                                    value={check.operatorComment || ''}
+                                    onChange={(e) => updateReviewStatus('mandatory', sourceIndex, 'approved', e.target.value)}
+                                    placeholder="输入人工复核备注（将导出至报告）..." 
+                                    className="w-full text-[11px] p-2 rounded-lg border border-emerald-100 bg-emerald-50/20 focus:outline-none focus:ring-1 focus:ring-emerald-300 h-16 resize-none placeholder:text-slate-300"
+                                  ></textarea>
+                               </div>
+                             )}
+                          </div>
                         </div>
                       </div>
                     );
@@ -893,33 +949,120 @@ const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, on
 
                   {/* 违规项警报 */}
                   {currentResult.forbidden_issues.map((issue, idx) => {
+                    const sourceIndex = activeRound === 'round1'
+                       ? localResult.round1.forbidden_issues.indexOf(issue)
+                       : (localResult.round2?.forbidden_issues.indexOf(issue) ?? -1);
                     const isRejected = issue.reviewStatus === 'rejected';
-                    if (isRejected) return null;
+                    const isApproved = issue.reviewStatus === 'approved';
 
                     return (
                       <div 
                         key={`alarm-f-${idx}`} 
-                        className="bg-white rounded-xl border border-red-100 overflow-hidden shadow-sm flex flex-col"
+                        id={`alarm-f-${idx}`}
+                        className={`bg-white rounded-2xl border overflow-hidden shadow-sm flex flex-col transition-all duration-300 relative ${
+                          isRejected ? 'border-slate-200 grayscale opacity-60' : 'border-red-100'
+                        }`}
+                        data-review-status={issue.reviewStatus || 'pending'}
+                        data-comment={issue.operatorComment || ''}
                       >
-                        <div className="bg-red-600 text-white px-4 py-2 flex items-center gap-2">
-                          <AlertOctagon size={16} />
-                          <span className="font-bold text-xs uppercase tracking-wider">违规内容警报</span>
-                        </div>
-                        <div className="p-4">
-                          <h4 className="font-black text-slate-800 mb-2">{issue.standard}</h4>
-                          <div className="bg-red-50 rounded-lg p-3 text-sm text-slate-700 border border-red-100 mb-3">
-                            <p className="text-[10px] font-bold text-red-600 uppercase mb-1">违规分析：</p>
-                            {issue.reason}
+                        {/* 误诊水印 */}
+                        {isRejected && (
+                          <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none">
+                            <div className="bg-slate-800/80 text-white text-[10px] font-black px-4 py-1.5 rounded-full uppercase tracking-widest shadow-lg transform -rotate-12 border border-slate-600">
+                              已标记为误诊 · 不会导出
+                            </div>
                           </div>
-                          <button 
-                            onClick={() => {
-                              const el = document.getElementById(`forbidden-${idx}`);
-                              if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                            }}
-                            className="text-[10px] font-bold text-blue-600 hover:text-blue-800 flex items-center gap-1"
+                        )}
+
+                        {/* 1. 卡片头部 */}
+                        <div className={`px-4 py-2 flex justify-between items-center transition-colors ${isRejected ? 'bg-slate-400' : 'bg-red-600'}`}>
+                          <div className="flex items-center gap-2">
+                            <span className="w-1.5 h-1.5 bg-white rounded-full"></span>
+                            <h1 className="text-white text-[11px] font-black tracking-widest uppercase">违规内容警报 #{idx + 1}</h1>
+                          </div>
+                          <div className="bg-white/20 backdrop-blur-md border border-white/20 px-2 py-0.5 rounded text-[9px] text-white font-bold">
+                            FORBIDDEN
+                          </div>
+                        </div>
+
+                        <div className="p-4 space-y-4">
+                          {/* 2. 违规详情 */}
+                          <div>
+                            <p className="text-[9px] font-black text-red-400 uppercase tracking-widest mb-1 flex items-center gap-1">
+                              <Ban size={10} /> 触犯规则
+                            </p>
+                            <div className="bg-red-50/50 rounded-xl p-3 border border-red-100/50">
+                              <h4 className="font-bold text-[13px] text-slate-800 mb-1">{issue.standard}</h4>
+                              <p className="text-[11px] text-red-700 leading-relaxed font-medium">
+                                {issue.reason}
+                              </p>
+                            </div>
+                          </div>
+
+                          {/* 3. 纠偏建议 */}
+                          {issue.suggestion && (
+                            <div className="bg-emerald-50/50 rounded-xl p-3 border border-emerald-100/50">
+                              <p className="text-[9px] font-black text-emerald-600 uppercase tracking-widest mb-1.5 flex items-center gap-1">
+                                <Sparkles size={10} /> 纠偏建议
+                              </p>
+                              <p className="text-[11px] text-emerald-800 leading-relaxed font-bold">
+                                {issue.suggestion}
+                              </p>
+                            </div>
+                          )}
+
+                          {/* 4. 违规现场证据 */}
+                          <div 
+                            onClick={() => handleQuoteClick(issue.detected_content, `alarm-f-${idx}`)}
+                            className="bg-red-50 border border-red-100 rounded-xl p-3 cursor-pointer hover:bg-red-100 transition-all active:scale-[0.98] group"
                           >
-                            查看详情并复核 <Search size={10} />
-                          </button>
+                             <p className="text-[9px] font-black text-red-400 uppercase tracking-widest mb-1.5 flex justify-between items-center">
+                                <span className="flex items-center gap-1"><Search size={10} /> 违规现场证据 (点击定位)</span>
+                                <ArrowDownCircle size={10} className="group-hover:translate-y-0.5 transition-transform" />
+                             </p>
+                             <p className="text-red-900 text-[12px] leading-relaxed italic font-medium">
+                               “{issue.detected_content}”
+                             </p>
+                          </div>
+
+                          {/* 5. 人工手检模块 */}
+                          <div className="pt-2 border-t border-slate-100">
+                             <div className="flex gap-2">
+                               <button 
+                                 onClick={() => updateReviewStatus('forbidden', sourceIndex, 'approved')}
+                                 className={`flex-1 py-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all ${
+                                   isApproved 
+                                   ? 'bg-emerald-600 text-white shadow-md' 
+                                   : 'bg-emerald-50 text-emerald-700 border border-emerald-100 hover:bg-emerald-100'
+                                 }`}
+                               >
+                                  <CheckCircle2 size={12} />
+                                  判定正确 (保留)
+                               </button>
+                               <button 
+                                 onClick={() => updateReviewStatus('forbidden', sourceIndex, isRejected ? 'pending' : 'rejected')}
+                                 className={`flex-1 py-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all ${
+                                   isRejected
+                                   ? 'bg-slate-600 text-white shadow-md'
+                                   : 'bg-slate-50 text-slate-400 border border-slate-200 hover:bg-red-50 hover:text-red-500 hover:border-red-100'
+                                 }`}
+                               >
+                                  <AlertOctagon size={12} />
+                                  {isRejected ? '撤销误诊' : '点击误诊 (排除)'}
+                               </button>
+                             </div>
+                             
+                             {isApproved && (
+                               <div className="mt-2 animate-in fade-in slide-in-from-top-1 duration-300">
+                                  <textarea 
+                                    value={issue.operatorComment || ''}
+                                    onChange={(e) => updateReviewStatus('forbidden', sourceIndex, 'approved', e.target.value)}
+                                    placeholder="输入人工复核备注（将导出至报告）..." 
+                                    className="w-full text-[11px] p-2 rounded-lg border border-emerald-100 bg-emerald-50/20 focus:outline-none focus:ring-1 focus:ring-emerald-300 h-16 resize-none placeholder:text-slate-300"
+                                  ></textarea>
+                               </div>
+                             )}
+                          </div>
                         </div>
                       </div>
                     );
@@ -984,13 +1127,6 @@ const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, on
                             </h4>
                           </div>
 
-                          <div className={`rounded-xl p-4 border relative ${isRejected ? 'bg-slate-50 border-slate-200' : 'bg-orange-50 border-orange-100'}`}>
-                            <p className={`text-[9px] font-bold uppercase tracking-wider mb-1 flex items-center gap-1 ${isRejected ? 'text-slate-500' : 'text-orange-600'}`}>
-                               <Sparkles size={12} /> 质检专家深度分析
-                            </p>
-                            <ExpandableText text={check.comment} maxLen={150} className="text-slate-800 font-medium" />
-                          </div>
-
                           {check.topic_scene && check.topic_scene.length > 2 && (
                             <div className="pt-2">
                               <div className="flex flex-col gap-2 w-full">
@@ -1015,15 +1151,7 @@ const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, on
                           )}
                         </div>
 
-                        {/* NEW MODULE: MANUAL REVIEW */}
-                        <ManualReviewBlock 
-                          status={check.reviewStatus}
-                          comment={check.operatorComment || ''}
-                          onConfirm={() => updateReviewStatus('mandatory', sourceIndex, 'approved')}
-                          onReject={() => updateReviewStatus('mandatory', sourceIndex, 'rejected')}
-                          onCommentChange={(val) => updateReviewStatus('mandatory', sourceIndex, 'approved', val)}
-                          onResetStatus={() => updateReviewStatus('mandatory', sourceIndex, 'pending', '')}
-                        />
+
                       </div>
                     );
                   })}
@@ -1175,10 +1303,6 @@ const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, on
                           </div>
 
                           <div className="space-y-4 pt-2">
-                            <div className="space-y-1">
-                              <p className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">质检专家深度分析</p>
-                              <ExpandableText text={issue.reason} maxLen={150} className="text-slate-600 font-medium" />
-                            </div>
                             <div className={`rounded-xl p-4 border ${isRejected ? 'bg-slate-50 border-slate-200' : 'bg-green-50 border-green-100'}`}>
                               <p className={`text-[9px] font-bold uppercase tracking-wider mb-1 flex items-center gap-1 ${isRejected ? 'text-slate-500' : 'text-green-600'}`}>
                                  <Sparkles size={12} /> 纠偏建议
@@ -1190,15 +1314,7 @@ const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, on
                           </div>
                         </div>
 
-                        {/* NEW MODULE: MANUAL REVIEW */}
-                        <ManualReviewBlock 
-                          status={issue.reviewStatus}
-                          comment={issue.operatorComment || ''}
-                          onConfirm={() => updateReviewStatus('forbidden', sourceIndex, 'approved')}
-                          onReject={() => updateReviewStatus('forbidden', sourceIndex, 'rejected')}
-                          onCommentChange={(val) => updateReviewStatus('forbidden', sourceIndex, 'approved', val)}
-                          onResetStatus={() => updateReviewStatus('forbidden', sourceIndex, 'pending', '')}
-                        />
+
                       </div>
                     );
                   })}

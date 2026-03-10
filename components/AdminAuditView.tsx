@@ -315,6 +315,7 @@ const AdminAuditView: React.FC<AdminAuditViewProps> = ({
                 <div 
                   key={checkId} 
                   ref={isExpanded ? activeItemRef : null}
+                  id={checkId} // 添加 ID 方便从报告跳转
                   className={`bg-white rounded-2xl border-2 shadow-sm transition-all overflow-hidden ${isPassed ? 'border-blue-100' : 'border-orange-100'}`}
                 >
                   <div 
@@ -337,10 +338,6 @@ const AdminAuditView: React.FC<AdminAuditViewProps> = ({
                     </div>
                     
                     <div className="flex items-center gap-4">
-                      <div className="text-right mr-4 hidden md:block">
-                        <p className="text-[10px] font-bold text-slate-400 uppercase">诊断结果</p>
-                        <p className={`text-sm font-bold ${isPassed ? 'text-blue-600' : 'text-orange-600'}`}>{check.comment || "无描述"}</p>
-                      </div>
                       {isExpanded ? <ChevronUp size={20} className="text-slate-400" /> : <ChevronDown size={20} className="text-slate-400" />}
                     </div>
                   </div>
