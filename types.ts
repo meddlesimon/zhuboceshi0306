@@ -92,3 +92,44 @@ export interface AnchorResult {
   r2EndPos: number;
   found: boolean;
 }
+
+// ============================================================
+// 新增：主播管理系统相关类型
+// ============================================================
+
+export interface Anchor {
+  id: number;
+  name: string;
+  created_at: string;
+}
+
+export interface StandardsVersion {
+  id: number;
+  version_label: string;
+  total_count: number;
+  created_at: string;
+  is_current: number;
+  content?: Standard[]; // 详情接口返回时包含
+}
+
+export type TaskStatus = 'pending' | 'running' | 'completed' | 'failed';
+
+export interface Task {
+  id: string;
+  anchor_id: number;
+  anchor_name: string;
+  standards_version_id: number | null;
+  standards_version_label?: string;
+  status: TaskStatus;
+  transcript_filename: string;
+  score_r1: number | null;
+  score_r2: number | null;
+  is_dual_mode: number; // 0 or 1
+  progress_message: string | null;
+  created_at: string;
+  completed_at: string | null;
+  error_message: string | null;
+  result?: MultiRoundResult; // 仅在详情查询时返回
+}
+
+export type AppPage = 'login' | 'home' | 'workspace' | 'anchor-admin' | 'script-admin';

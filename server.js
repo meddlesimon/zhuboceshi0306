@@ -470,7 +470,461 @@ app.post('/api/test-ai', async (req, res) => {
   }
 });
 
+// ============================================================
+// 以下为新增：SQLite 数据库 + 主播/话术/任务管理接口
+// 原有接口一字未动
+// ============================================================
+
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
+
+import { existsSync, mkdirSync } from 'fs';
+
+// 数据目录（Docker volume 挂载点）
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
+if (!existsSync(DATA_DIR)) {
+  mkdirSync(DATA_DIR, { recursive: true });
+}
+const DB_PATH = path.join(DATA_DIR, 'zhuboceshi.db');
+
+let db;
+try {
+  const Database = require('better-sqlite3');
+  db = new Database(DB_PATH);
+  db.pragma('journal_mode = WAL');
+  initDatabase(db);
+  console.log('[DB] SQLite initialized at', DB_PATH);
+} catch (e) {
+  console.error('[DB] better-sqlite3 load failed:', e.message);
+  db = null;
+}
+
+function initDatabase(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS anchors (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE,
+      created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+    );
+
+    CREATE TABLE IF NOT EXISTS standards_versions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      version_label TEXT NOT NULL,
+      content_json TEXT NOT NULL,
+      total_count INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+      is_current INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS tasks (
+      id TEXT PRIMARY KEY,
+      anchor_id INTEGER NOT NULL,
+      anchor_name TEXT NOT NULL,
+      standards_version_id INTEGER,
+      status TEXT NOT NULL DEFAULT 'pending',
+      transcript_filename TEXT NOT NULL DEFAULT '',
+      transcript_text TEXT NOT NULL DEFAULT '',
+      result_json TEXT,
+      progress_message TEXT,
+      score_r1 REAL,
+      score_r2 REAL,
+      is_dual_mode INTEGER DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+      completed_at TEXT,
+      error_message TEXT
+    );
+  `);
+
+  // 初始化默认主播（王老师、小陈老师、可乐老师）
+  const defaultAnchors = ['王老师', '小陈老师', '可乐老师'];
+  const insertAnchor = db.prepare(`INSERT OR IGNORE INTO anchors (name) VALUES (?)`);
+  for (const name of defaultAnchors) {
+    insertAnchor.run(name);
+  }
+}
+
+// ---- 辅助：生成 task id ----
+function genTaskId() {
+  return 'task_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+}
+
+// ---- 辅助：计算综合得分 ----
+function calcScore(analysisResult) {
+  if (!analysisResult) return null;
+  const mandatory = analysisResult.mandatory_checks || [];
+  if (mandatory.length === 0) return null;
+  const total = mandatory.reduce((sum, c) => sum + (c.score || 0), 0);
+  return Math.round(total / mandatory.length);
+}
+
+// ============================================================
+// API：主播管理
+// ============================================================
+
+// 获取所有主播
+app.get('/api/anchors', (req, res) => {
+  if (!db) return res.status(503).json({ error: 'Database not available' });
+  try {
+    const anchors = db.prepare('SELECT * FROM anchors ORDER BY id ASC').all();
+    res.json(anchors);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 新增主播
+app.post('/api/anchors', (req, res) => {
+  if (!db) return res.status(503).json({ error: 'Database not available' });
+  const { name } = req.body;
+  if (!name || !name.trim()) return res.status(400).json({ error: '主播名不能为空' });
+  try {
+    const stmt = db.prepare('INSERT INTO anchors (name) VALUES (?)');
+    const result = stmt.run(name.trim());
+    const anchor = db.prepare('SELECT * FROM anchors WHERE id = ?').get(result.lastInsertRowid);
+    res.json(anchor);
+  } catch (e) {
+    if (e.message.includes('UNIQUE')) return res.status(409).json({ error: '该主播已存在' });
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 删除主播
+app.delete('/api/anchors/:id', (req, res) => {
+  if (!db) return res.status(503).json({ error: 'Database not available' });
+  const { id } = req.params;
+  try {
+    db.prepare('DELETE FROM tasks WHERE anchor_id = ?').run(id);
+    const result = db.prepare('DELETE FROM anchors WHERE id = ?').run(id);
+    if (result.changes === 0) return res.status(404).json({ error: '主播不存在' });
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ============================================================
+// API：话术版本管理（全局共用）
+// ============================================================
+
+// 获取所有话术版本列表
+app.get('/api/standards', (req, res) => {
+  if (!db) return res.status(503).json({ error: 'Database not available' });
+  try {
+    const versions = db.prepare(
+      'SELECT id, version_label, total_count, created_at, is_current FROM standards_versions ORDER BY id DESC'
+    ).all();
+    res.json(versions);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 获取某个版本的完整话术内容
+app.get('/api/standards/:id', (req, res) => {
+  if (!db) return res.status(503).json({ error: 'Database not available' });
+  try {
+    const ver = db.prepare('SELECT * FROM standards_versions WHERE id = ?').get(req.params.id);
+    if (!ver) return res.status(404).json({ error: '版本不存在' });
+    res.json({ ...ver, content: JSON.parse(ver.content_json) });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 获取当前使用的话术版本
+app.get('/api/standards/current/detail', (req, res) => {
+  if (!db) return res.status(503).json({ error: 'Database not available' });
+  try {
+    const ver = db.prepare('SELECT * FROM standards_versions WHERE is_current = 1 ORDER BY id DESC LIMIT 1').get();
+    if (!ver) return res.status(404).json({ error: '尚未上传话术' });
+    res.json({ ...ver, content: JSON.parse(ver.content_json) });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 上传新版本话术（自动设为当前版本）
+app.post('/api/standards', (req, res) => {
+  if (!db) return res.status(503).json({ error: 'Database not available' });
+  const { content_json } = req.body;
+  if (!content_json || !Array.isArray(content_json) || content_json.length === 0) {
+    return res.status(400).json({ error: '话术内容不能为空' });
+  }
+  try {
+    // 将旧版本全部设为非当前
+    db.prepare('UPDATE standards_versions SET is_current = 0').run();
+    // 自动生成版本号
+    const count = db.prepare('SELECT COUNT(*) as c FROM standards_versions').get().c;
+    const version_label = `v${count + 1}`;
+    const stmt = db.prepare(
+      'INSERT INTO standards_versions (version_label, content_json, total_count, is_current) VALUES (?, ?, ?, 1)'
+    );
+    const result = stmt.run(version_label, JSON.stringify(content_json), content_json.length);
+    const ver = db.prepare('SELECT * FROM standards_versions WHERE id = ?').get(result.lastInsertRowid);
+    res.json({ ...ver, content: content_json });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ============================================================
+// API：质检任务管理
+// ============================================================
+
+// 提交质检任务（后台异步执行）
+app.post('/api/tasks', async (req, res) => {
+  if (!db) return res.status(503).json({ error: 'Database not available' });
+  const { anchor_id, transcript_text, transcript_filename, is_dual_mode } = req.body;
+  if (!anchor_id || !transcript_text) {
+    return res.status(400).json({ error: 'anchor_id 和 transcript_text 为必填项' });
+  }
+
+  // 获取主播信息
+  const anchor = db.prepare('SELECT * FROM anchors WHERE id = ?').get(anchor_id);
+  if (!anchor) return res.status(404).json({ error: '主播不存在' });
+
+  // 获取当前话术版本
+  const stdVer = db.prepare('SELECT * FROM standards_versions WHERE is_current = 1 ORDER BY id DESC LIMIT 1').get();
+  if (!stdVer) return res.status(400).json({ error: '尚未配置话术，请先在话术管理页上传话术' });
+
+  const taskId = genTaskId();
+  const isDual = is_dual_mode === true || is_dual_mode === 1;
+
+  // 写入数据库
+  db.prepare(`
+    INSERT INTO tasks (id, anchor_id, anchor_name, standards_version_id, status, transcript_filename, transcript_text, is_dual_mode)
+    VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)
+  `).run(taskId, anchor_id, anchor.name, stdVer.id, transcript_filename || '未命名', transcript_text, isDual ? 1 : 0);
+
+  // 立即返回 task_id，后台开始执行
+  res.json({ task_id: taskId, status: 'pending' });
+
+  // 后台异步执行（不 await，不阻塞响应）
+  runTaskInBackground(taskId, stdVer, transcript_text, isDual).catch(e => {
+    console.error('[Task Background Error]', taskId, e.message);
+  });
+});
+
+// 后台任务执行函数
+async function runTaskInBackground(taskId, stdVer, transcriptText, isDual) {
+  const updateStatus = (status, progress) => {
+    if (!db) return;
+    db.prepare('UPDATE tasks SET status = ?, progress_message = ? WHERE id = ?')
+      .run(status, progress || null, taskId);
+  };
+
+  try {
+    updateStatus('running', '正在准备质检...');
+    const standards = JSON.parse(stdVer.content_json);
+
+    // 复用现有质检逻辑（从 doubaoService 移植到后端）
+    let result;
+
+    if (isDual) {
+      updateStatus('running', '正在扫描双轮锚点...');
+      // 调用内部 split 逻辑
+      const splitResult = await callInternalSplit(transcriptText);
+      
+      if (!splitResult.found || !splitResult.r1_end_phrase) {
+        updateStatus('running', '未检测到双轮，降级为单轮质检...');
+        const r1 = await runSingleRoundAnalysis(transcriptText, standards, taskId, 'r1');
+        result = { round1: r1, round1Text: transcriptText, fullRawText: transcriptText, isDualMode: false };
+      } else {
+        updateStatus('running', '双轮结构确认，并行分析中...');
+        // 按锚点切分
+        const r1EndIdx = transcriptText.indexOf(splitResult.r1_end_phrase.slice(0, 6));
+        const r2StartIdx = transcriptText.indexOf(splitResult.r2_start_phrase.slice(0, 6));
+        const part1 = r1EndIdx > 0 ? transcriptText.slice(0, r1EndIdx + splitResult.r1_end_phrase.length) : transcriptText;
+        const part2 = r2StartIdx > 0 ? transcriptText.slice(r2StartIdx) : '';
+
+        if (!part2 || part2.length < 50) {
+          const r1 = await runSingleRoundAnalysis(transcriptText, standards, taskId, 'r1');
+          result = { round1: r1, round1Text: transcriptText, fullRawText: transcriptText, isDualMode: false };
+        } else {
+          const [r1, r2] = await Promise.all([
+            runSingleRoundAnalysis(part1, standards, taskId, 'r1'),
+            runSingleRoundAnalysis(part2, standards, taskId, 'r2')
+          ]);
+          result = {
+            round1: r1, round2: r2,
+            round1Text: part1, round2Text: part2,
+            fullRawText: transcriptText, isDualMode: true,
+            splitAnchors: {
+              r1StartPhrase: splitResult.r1_start_phrase || '',
+              r1EndPhrase: splitResult.r1_end_phrase || '',
+              r2StartPhrase: splitResult.r2_start_phrase || '',
+              r2EndPhrase: splitResult.r2_end_phrase || ''
+            }
+          };
+        }
+      }
+    } else {
+      updateStatus('running', '单轮质检中...');
+      const r1 = await runSingleRoundAnalysis(transcriptText, standards, taskId, 'r1');
+      result = { round1: r1, round1Text: transcriptText, fullRawText: transcriptText, isDualMode: false };
+    }
+
+    // 计算得分
+    const scoreR1 = calcScoreFromResult(result.round1);
+    const scoreR2 = result.round2 ? calcScoreFromResult(result.round2) : null;
+
+    // 写入结果
+    db.prepare(`
+      UPDATE tasks SET status = 'completed', result_json = ?, score_r1 = ?, score_r2 = ?,
+        is_dual_mode = ?, progress_message = '质检完成', completed_at = datetime('now','localtime')
+      WHERE id = ?
+    `).run(JSON.stringify(result), scoreR1, scoreR2, result.isDualMode ? 1 : 0, taskId);
+
+    console.log('[Task Completed]', taskId, 'r1:', scoreR1, 'r2:', scoreR2);
+  } catch (e) {
+    console.error('[Task Failed]', taskId, e.message);
+    if (db) {
+      db.prepare(`UPDATE tasks SET status = 'failed', error_message = ?, progress_message = '质检失败' WHERE id = ?`)
+        .run(e.message, taskId);
+    }
+  }
+}
+
+// 内部 split 调用（复用已有 prompt 逻辑）
+async function callInternalSplit(fullText) {
+  const analysisText = fullText.slice(0, 100000);
+  const prompt = `
+    你是一位极其精密、严谨的直播质检专家。
+    任务：从直播转写文本中，精准提取"第一轮"和"第二轮"业务演练的边界原话。
+
+    【核心边界判定准则】
+    1. 每一轮的【开启时刻】：主播发起品牌互动，引导家长"扣数字"，出现连续"扣一"到"扣五"。
+    2. 每一轮的【结束时刻】：主播完成"321上链接"并按顺序报出1/2/3号链接产品名称。
+
+    【输出原话提取要求】必须从原文提取15-20字连续原话，严禁概括修饰。
+
+    【输出 JSON 格式（严禁多余文字）】
+    {
+      "found": boolean,
+      "r1_start_phrase": "...",
+      "r1_end_phrase": "...",
+      "r2_start_phrase": "...",
+      "r2_end_phrase": "..."
+    }
+
+    【待分析文本】${analysisText}
+  `;
+  const resultText = await callGemini(prompt);
+  return safeJsonParse(resultText);
+}
+
+// 单轮分析（逐条调用 check-single-window，但在后台执行）
+async function runSingleRoundAnalysis(transcriptText, standards, taskId, roundLabel) {
+  const mandatory = standards.filter(s => s.type === 'mandatory');
+  const forbidden = standards.filter(s => s.type === 'forbidden');
+
+  // 并行处理 mandatory
+  const mandatoryResults = await Promise.all(
+    mandatory.map(async (std) => {
+      const WINDOW_SIZE = 6000;
+      const pos = std.theoretical_pos || 0.5;
+      const textLen = transcriptText.length;
+      const center = Math.floor(pos * textLen);
+      const start = Math.max(0, center - WINDOW_SIZE / 2);
+      const windowText = transcriptText.slice(start, start + WINDOW_SIZE);
+
+      try {
+        const resp = await axios.post(`http://127.0.0.1:${PORT}/api/check-single-window`, {
+          windowText, standardContent: std.content, ruleName: std.qaFocus
+        }, { timeout: 120000 });
+        return {
+          standard: std.qaFocus,
+          status: resp.data.detected ? 'passed' : 'missed',
+          score: resp.data.score || 0,
+          performance_grade: resp.data.performance_grade,
+          detected_content: resp.data.core_evidence || '',
+          comment: resp.data.reason_or_comment || '',
+          standardContent: std.content,
+          windowSnippet: windowText,
+          topic_scene: resp.data.topic_scene || ''
+        };
+      } catch (e) {
+        return {
+          standard: std.qaFocus, status: 'missed', score: 0,
+          comment: '分析出错: ' + e.message, standardContent: std.content, windowSnippet: windowText
+        };
+      }
+    })
+  );
+
+  // 并行处理 forbidden
+  let forbiddenResults = [];
+  if (forbidden.length > 0) {
+    try {
+      const resp = await axios.post(`http://127.0.0.1:${PORT}/api/check-standards-batch`, {
+        transcript: transcriptText, standards: forbidden
+      }, { timeout: 120000 });
+      forbiddenResults = forbidden.map((std, idx) => ({
+        standard: std.qaFocus,
+        detected_content: resp.data[idx]?.quote || '',
+        reason: resp.data[idx]?.reason_or_comment || '',
+        suggestion: ''
+      })).filter((_, idx) => resp.data[idx]?.detected);
+    } catch (e) {
+      console.warn('[runSingleRoundAnalysis] forbidden check failed:', e.message);
+    }
+  }
+
+  return {
+    mandatory_checks: mandatoryResults,
+    forbidden_issues: forbiddenResults
+  };
+}
+
+// 计算平均得分
+function calcScoreFromResult(analysisResult) {
+  if (!analysisResult) return null;
+  const checks = analysisResult.mandatory_checks || [];
+  if (checks.length === 0) return null;
+  const total = checks.reduce((sum, c) => sum + (Number(c.score) || 0), 0);
+  return Math.round(total / checks.length);
+}
+
+// 查询任务状态
+app.get('/api/tasks/:id', (req, res) => {
+  if (!db) return res.status(503).json({ error: 'Database not available' });
+  try {
+    const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(req.params.id);
+    if (!task) return res.status(404).json({ error: '任务不存在' });
+    const result = {
+      ...task,
+      result: task.result_json ? JSON.parse(task.result_json) : null,
+      result_json: undefined
+    };
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 获取某主播的历史任务列表
+app.get('/api/anchors/:id/tasks', (req, res) => {
+  if (!db) return res.status(503).json({ error: 'Database not available' });
+  try {
+    const tasks = db.prepare(`
+      SELECT t.id, t.anchor_id, t.anchor_name, t.status, t.transcript_filename,
+             t.score_r1, t.score_r2, t.is_dual_mode, t.progress_message,
+             t.created_at, t.completed_at, t.error_message,
+             sv.version_label as standards_version_label
+      FROM tasks t
+      LEFT JOIN standards_versions sv ON t.standards_version_id = sv.id
+      WHERE t.anchor_id = ?
+      ORDER BY t.created_at DESC
+    `).all(req.params.id);
+    res.json(tasks);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ============================================================
 // Serve static files from the React app
+// ============================================================
 app.use(express.static(path.join(__dirname, 'dist')));
 
 app.get('*', (req, res) => {

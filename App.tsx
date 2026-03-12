@@ -1,11 +1,15 @@
 
 import React, { useState } from 'react';
-import { Standard, AppStep, AnalysisResult, MultiRoundResult, StreamMetadata, AnchorResult } from './types';
+import { Standard, AppStep, AnalysisResult, MultiRoundResult, StreamMetadata, AnchorResult, Anchor, AppPage } from './types';
 import Header from './components/Header';
 import ReportView from './components/ReportView';
 import FileUploader from './components/FileUploader';
 import StandardsExport from './components/StandardsExport'; // Import the new component
 import AnchorVerification from './components/AnchorVerification'; // Import the new component
+import AnchorSelector from './components/AnchorSelector';
+import WorkspaceView from './components/WorkspaceView';
+import AnchorAdminPage from './components/AnchorAdminPage';
+import ScriptAdminPage from './components/ScriptAdminPage';
 import { parseStandardsCSV, parseTranscript, parseMetadataFromFilename } from './utils/csvHelper';
 import { analyzeScript, splitTranscript, findCandidateAnchors } from './services/doubaoService';
 import { 
@@ -25,6 +29,15 @@ import {
 } from 'lucide-react';
 
 const App: React.FC = () => {
+  // ============================================================
+  // 新增：顶层页面路由（不影响原有步骤逻辑）
+  // ============================================================
+  const [appPage, setAppPage] = useState<AppPage>('login');
+  const [selectedAnchor, setSelectedAnchor] = useState<Anchor | null>(null);
+
+  // ============================================================
+  // 以下为原有状态（一字未动）
+  // ============================================================
   const [step, setStep] = useState<AppStep>(AppStep.LOGIN);
   const [isLoginLoading, setIsLoginLoading] = useState(false);
   const [standards, setStandards] = useState<Standard[]>([]);
@@ -63,7 +76,8 @@ const App: React.FC = () => {
       });
       const data = await response.json();
       if (data.success) {
-        setStep(AppStep.UPLOAD_STANDARDS);
+        // 登录成功后跳转到主播选择页（新增）
+        setAppPage('home');
       } else {
         setError(data.error || "账号或密码错误");
       }
@@ -229,6 +243,36 @@ const App: React.FC = () => {
     setIsDualRound(true); // Reset to true as it is now the default
     setHeaderActions(null);
   };
+
+  // ============================================================
+  // 新增：渲染新页面（不影响原有 return 逻辑）
+  // ============================================================
+  if (appPage === 'home') {
+    return (
+      <AnchorSelector
+        onSelectAnchor={(anchor) => { setSelectedAnchor(anchor); setAppPage('workspace'); }}
+        onGoAnchorAdmin={() => setAppPage('anchor-admin')}
+        onGoScriptAdmin={() => setAppPage('script-admin')}
+      />
+    );
+  }
+
+  if (appPage === 'workspace' && selectedAnchor) {
+    return (
+      <WorkspaceView
+        anchor={selectedAnchor}
+        onBack={() => setAppPage('home')}
+      />
+    );
+  }
+
+  if (appPage === 'anchor-admin') {
+    return <AnchorAdminPage onBack={() => setAppPage('home')} />;
+  }
+
+  if (appPage === 'script-admin') {
+    return <ScriptAdminPage onBack={() => setAppPage('home')} />;
+  }
 
   // Helper to count Importance
   const todayCount = standards.filter(s => s.importance === 'high').length;
