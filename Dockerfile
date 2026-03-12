@@ -1,10 +1,7 @@
 FROM node:20-alpine
 WORKDIR /app
 
-# 安装 better-sqlite3 编译所需的原生工具链
-RUN apk add --no-cache python3 make g++
-
-# 1. 拷贝 package.json 并安装生产环境依赖（含 better-sqlite3）
+# 1. 拷贝 package.json 并安装生产环境依赖
 COPY package*.json ./
 RUN npm install --production
 
