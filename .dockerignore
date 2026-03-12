@@ -1,5 +1,5 @@
 node_modules
-dist
+# dist (needed for deployment as it is copied in Dockerfile)
 .env
 .git
 .codebuddy

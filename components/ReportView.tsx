@@ -57,17 +57,17 @@ const parseDiagnosisLines = (text: string) => {
       return;
     }
 
-    // 2. 匹配核心要素：兼容各种括号、冒号和连接符变体
-    // 模式：要素 X [名称]：[得分] —— 评语
-    const match = line.match(/要素\s*(\d+)\s*[\[\(]?(.*?)[\]\)]?[：:]\s*[\[\(]?(.*?)[\]\)]?\s*[——-]\s*(.*)/);
+    // 2. 增强版匹配：兼容 [名称]、(名称) 或直接 文本
+    // 目标格式：要素 1 [标准动作]：[10/20] —— 实操评语
+    const match = line.match(/要素\s*(\d+)\s*[\[\(\【]?(.*?)[\]\)\】]?[：:]\s*[\[\(\【]?(.*?)[\]\)\】]?\s*[——-]\s*(.*)/);
     if (match) {
       const [_, id, name, score, desc] = match;
       const scores = score.split('/').map(n => parseInt(n));
       elements.push({
         id,
-        name,
+        name: name.trim(), // 标准动作
         score,
-        description: desc,
+        description: desc.trim(), // 实操复盘
         isFailed: (scores.length > 0 && scores[0] === 0) || score.includes('0分')
       });
     }
@@ -77,37 +77,112 @@ const parseDiagnosisLines = (text: string) => {
 };
 
 /**
- * 诊断结果结构化展示组件 - 高密度组件 (v3.0 Pixel Perfect)
+ * 根据分数获取等级
  */
-const DiagnosisDisplay: React.FC<{ score: number, elements: any[], isRejected?: boolean }> = ({ score, elements, isRejected = false }) => {
+const getGradeFromScore = (score: number) => {
+  if (score < 60) return 'poor';
+  if (score < 85) return 'fair';
+  return 'good';
+};
+
+/**
+ * 诊断结果结构化展示组件 - 高密度组件 (v3.0 Pixel Perfect)
+ * 增加：人工手检交互
+ */
+const DiagnosisDisplay: React.FC<{ 
+  score: number, 
+  elements: any[], 
+  isRejected?: boolean,
+  elementStates?: Record<string, number>, // 改为存储具体数值
+  onElementCheck?: (id: string, score: number) => void // 传递数值
+}> = ({ elements, isRejected = false, elementStates = {}, onElementCheck }) => {
   if (!elements || elements.length === 0) return null;
+
+  // 1. 计算实时总分
+  const manualScore = elements.reduce((acc, el) => {
+    const aiScore = parseInt(el.score.split('/')[0]) || 0;
+    const currentScore = elementStates[el.id] !== undefined ? elementStates[el.id] : aiScore;
+    return acc + currentScore;
+  }, 0);
+
+  const currentGrade = getGradeFromScore(manualScore);
+  const gradeColors = {
+    poor: 'text-red-600 bg-red-50 border-red-100',
+    fair: 'text-orange-600 bg-orange-50 border-orange-100',
+    good: 'text-emerald-600 bg-emerald-50 border-emerald-100'
+  };
 
   return (
     <div className={`space-y-2 ${isRejected ? 'opacity-50 grayscale' : ''}`}>
-      {/* 综合得分 */}
-      <div className="flex justify-between items-center bg-white px-3 py-1.5 rounded-lg border border-red-100/50 shadow-sm">
-        <span className="text-[10px] font-bold text-red-800">综合判定得分</span>
-        <span className="text-lg font-black text-red-600">{score} 分</span>
+      {/* 综合得分与等级 */}
+      <div className="flex justify-between items-center bg-white px-3 py-2 rounded-xl border border-red-100/50 shadow-sm">
+        <div className="flex items-center gap-2">
+           <span className="text-[10px] font-black text-red-800 uppercase tracking-wider">核定得分</span>
+           <div className={`px-2 py-0.5 rounded text-[9px] font-black border uppercase ${gradeColors[currentGrade]}`}>
+             {currentGrade}
+           </div>
+        </div>
+        <div className="flex items-baseline gap-1">
+           <span className="text-xl font-black text-red-600" key={manualScore}>{manualScore}</span>
+           <span className="text-[10px] font-bold text-red-400">/ 100</span>
+        </div>
       </div>
       
       {/* 要素明细列表 */}
-      <div className="divide-y divide-red-100/30 bg-white/80 rounded-lg px-2 py-0.5 shadow-sm">
-        {elements.map((el, i) => (
-          <div key={i} className="py-2">
-            <div className="flex justify-between items-center mb-0.5">
-              <span className="text-[11px] font-bold text-gray-800 flex items-center gap-1.5">
-                 <i className="w-3.5 h-3.5 bg-red-100 text-red-600 rounded-sm flex items-center justify-center text-[9px] not-italic font-black">{el.id}</i>
-                 {el.name}
-              </span>
-              <span className="text-[9px] font-bold text-red-600 font-mono">{el.score}</span>
+      <div className="divide-y divide-red-100/20 bg-white/80 rounded-xl px-2 py-0.5 shadow-sm border border-red-50/50">
+        {elements.map((el, i) => {
+          const aiScore = parseInt(el.score.split('/')[0]) || 0;
+          const maxScore = parseInt(el.score.split('/')[1]) || 0;
+          const halfScore = Math.floor(maxScore / 2);
+          const currentScore = elementStates[el.id] !== undefined ? elementStates[el.id] : aiScore;
+          
+          // 三档分值选项
+          const options = [0, halfScore, maxScore];
+
+          return (
+            <div key={i} className="py-2.5">
+              <div className="flex justify-between items-start mb-1">
+                <div className="flex gap-2 items-start flex-1">
+                  <i className="mt-0.5 w-4 h-4 rounded-md flex items-center justify-center text-[10px] not-italic font-black shrink-0 bg-red-100 text-red-600">
+                    {el.id}
+                  </i>
+                  <div className="flex-1">
+                    <div className="flex justify-between items-center mb-0.5">
+                       <span className="text-[11px] font-bold text-gray-800">
+                        {el.name}
+                       </span>
+                    </div>
+                    <p className="text-[10px] text-gray-500 leading-tight pr-2">{el.description}</p>
+                  </div>
+                </div>
+
+                {/* 分值快速调整按钮 */}
+                {onElementCheck && (
+                  <div className="flex gap-1 ml-2 shrink-0 bg-slate-100 p-0.5 rounded-lg border border-slate-200">
+                    {options.map((val) => (
+                      <button 
+                        key={val}
+                        onClick={() => onElementCheck(el.id, val)}
+                        className={`px-2 py-1 rounded-md text-[10px] font-black transition-all ${
+                          currentScore === val 
+                          ? 'bg-blue-600 text-white shadow-sm scale-105' 
+                          : 'text-slate-400 hover:bg-white hover:text-blue-500'
+                        }`}
+                      >
+                        {val}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
-            <p className="text-[10px] text-gray-500 pl-[22px] leading-tight">{el.description}</p>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
 };
+
 
 /**
  * Expandable Text Component for long quotes or comments
@@ -206,6 +281,37 @@ const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, on
     });
   };
 
+  /**
+   * Update individual element state (Manual Review)
+   */
+  const updateElementState = (
+    index: number,
+    elementId: string,
+    newScore: number // 改为接收数值
+  ) => {
+    setLocalResult(prev => {
+      const next = { ...prev };
+      const targetRound = activeRound === 'round1' ? next.round1 : (next.round2 || next.round1);
+      const item = targetRound.mandatory_checks[index];
+      
+      const states = { ...(item.elementStates || {}) };
+      states[elementId] = newScore; // 直接存储数值
+      item.elementStates = states;
+
+      // 重新计算总分并同步状态
+      const { elements } = parseDiagnosisLines(item.comment);
+      const manualTotal = elements.reduce((acc, el) => {
+        const aiScore = parseInt(el.score.split('/')[0]) || 0;
+        return acc + (states[el.id] !== undefined ? states[el.id] : aiScore);
+      }, 0);
+
+      item.performance_grade = getGradeFromScore(manualTotal);
+      item.status = manualTotal >= 60 ? 'passed' : 'missed';
+
+      return next;
+    });
+  };
+
   const waitForImages = async (element: HTMLElement) => {
     const images = Array.from(element.querySelectorAll('img'));
     if (images.length === 0) return;
@@ -281,43 +387,48 @@ const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, on
         clone.querySelectorAll(sel).forEach(el => el.remove());
       });
 
-      // --- STRICT FILTERING LOGIC ---
+      // --- STRICT FILTERING LOGIC: ONLY EXCLUDE REJECTED ---
       const issueCards = clone.querySelectorAll('.issue-card');
+      let approvedCount = 0;
       let visibleCount = 0;
 
       issueCards.forEach(card => {
         const el = card as HTMLElement;
         const status = el.dataset.reviewStatus; // 'approved' | 'rejected' | 'pending'
 
-        // Rule: Only export 'approved' (Confirmed) items
-        if (status !== 'approved') {
+        // 1. 只有标记为“误诊”的才排除，其他（已确认、待定）都保留
+        if (status === 'rejected') {
           el.remove();
           return;
         }
 
         visibleCount++;
+        if (status === 'approved') approvedCount++;
 
         // Fix styling for card
         el.style.boxShadow = 'none';
         el.style.marginBottom = '16px';
         el.style.border = '1px solid #e2e8f0';
 
-        // Replace Manual Review Input with Static Text
-        const comment = el.dataset.comment || '';
-        
-        // Find the footer
-        const footer = el.lastElementChild as HTMLElement;
-        if (footer) {
-           const staticNote = document.createElement('div');
-           staticNote.className = "mt-0 p-3 bg-green-50 border-t border-green-100";
-           staticNote.innerHTML = `
-             <div class="flex items-center gap-1 mb-1">
-               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" class="text-green-600"><path d="M20 6L9 17l-5-5"></path></svg>
-               <span class="text-xs font-bold text-green-700">人工已确认</span>
-             </div>
-             <p class="text-sm text-slate-900 font-medium leading-relaxed whitespace-pre-wrap">${comment || '（无附加备注）'}</p>
-           `;
-           footer.replaceWith(staticNote);
+        // 2. 清理操作区域，保留诊断内容和原话
+        const reviewModule = el.querySelector('.review-module') as HTMLElement;
+        if (reviewModule) {
+           if (status === 'approved') {
+              const comment = el.dataset.comment || '';
+              const staticNote = document.createElement('div');
+              staticNote.className = "mt-0 p-3 bg-green-50 border-t border-green-100";
+              staticNote.innerHTML = `
+                <div class="flex items-center gap-1 mb-1">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" class="text-green-600"><path d="M20 6L9 17l-5-5"></path></svg>
+                  <span class="text-xs font-bold text-green-700">人工已确认</span>
+                </div>
+                <p class="text-sm text-slate-900 font-medium leading-relaxed whitespace-pre-wrap">${comment || '（无附加备注）'}</p>
+              `;
+              reviewModule.replaceWith(staticNote);
+           } else {
+              // 对于“待定”项，直接移除按钮模块即可，上方诊断内容会自动上移保留
+              reviewModule.remove();
+           }
         }
       });
 
@@ -325,24 +436,34 @@ const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, on
       const header = document.createElement('div');
       header.className = "mb-6 pb-4 border-b border-slate-200";
       header.innerHTML = `
-        <h1 class="text-xl font-black text-slate-900 mb-2">直播质检·人工确认单</h1>
+        <h1 class="text-xl font-black text-slate-900 mb-2">直播质检报告</h1>
         <div class="flex justify-between items-end text-xs text-slate-500">
           <div>
             <p>主播：<span class="font-bold text-slate-900">${metadata.anchorName || '-'}</span></p>
             <p>日期：${metadata.date || new Date().toLocaleDateString()}</p>
           </div>
-          <span class="bg-blue-50 text-blue-600 px-2 py-1 rounded font-bold">已确认 ${visibleCount} 项</span>
+          <div class="flex flex-col items-end gap-1">
+            <span class="bg-blue-50 text-blue-600 px-2 py-1 rounded font-bold">已确认 ${approvedCount} 项</span>
+            <span class="text-[9px]">共包含 ${visibleCount} 处重点反馈</span>
+          </div>
         </div>
       `;
       clone.prepend(header);
 
-      // 4. Handle Empty State
+      // 4. 清理空容器（如果某个警报区过滤后没有任何“已确认”项，则移除整个红色背景区块）
+      clone.querySelectorAll('.bg-red-50').forEach(container => {
+        if (container.querySelectorAll('.issue-card').length === 0) {
+          container.remove();
+        }
+      });
+
+      // 5. Handle Empty State
       if (visibleCount === 0) {
         const msg = document.createElement('div');
         msg.className = "p-8 text-center border-2 border-dashed border-slate-200 rounded-xl mt-4";
         msg.innerHTML = `
-          <p class="text-slate-400 font-bold mb-1">本次无人工确认的风险项</p>
-          <p class="text-xs text-slate-300">请在报告页面点击“确认保留”后再导出</p>
+          <p class="text-slate-400 font-bold mb-1">报告暂无可导出内容</p>
+          <p class="text-xs text-slate-300">请检查是否所有项都已被标记为“误诊”</p>
         `;
         clone.appendChild(msg);
       } else {
@@ -753,7 +874,7 @@ const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, on
               className={`bg-blue-600 hover:bg-blue-700 text-white px-3 py-2 md:px-4 rounded-lg font-bold flex items-center gap-2 shadow-lg transition-all active:scale-95 text-xs md:text-sm ${isExporting ? 'opacity-75 cursor-wait' : ''}`}
             >
               {isExporting ? <Loader2 size={16} className="animate-spin" /> : <Download size={16} />}
-              <span>导出 PDF (仅已确认)</span>
+              <span>导出 PDF 报告</span>
             </button>
         </div>
       </div>
@@ -838,7 +959,7 @@ const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, on
                       <div 
                         key={`alarm-m-${idx}`} 
                         id={`alarm-m-${idx}`}
-                        className={`bg-white rounded-2xl border overflow-hidden shadow-sm flex flex-col transition-all duration-300 relative ${
+                        className={`issue-card bg-white rounded-2xl border overflow-hidden shadow-sm flex flex-col transition-all duration-300 relative ${
                           isRejected ? 'border-slate-200 grayscale opacity-60' : 'border-red-100'
                         }`}
                         data-review-status={check.reviewStatus || 'pending'}
@@ -880,7 +1001,13 @@ const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, on
                             {(() => {
                               const { score, elements } = parseDiagnosisLines(check.comment);
                               return elements.length > 0 ? (
-                                <DiagnosisDisplay score={score} elements={elements} isRejected={isRejected} />
+                                <DiagnosisDisplay 
+                                  score={score} 
+                                  elements={elements} 
+                                  isRejected={isRejected}
+                                  elementStates={check.elementStates}
+                                  onElementCheck={(elId, state) => updateElementState(sourceIndex, elId, state)}
+                                />
                               ) : (
                                 <p className="text-[11px] text-red-800 leading-relaxed italic">{check.comment}</p>
                               );
@@ -904,7 +1031,7 @@ const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, on
                           )}
 
                           {/* 5. 人工手检模块 */}
-                          <div className="pt-2 border-t border-slate-100">
+                          <div className="review-module pt-2 border-t border-slate-100">
                              <div className="flex gap-2">
                                <button 
                                  onClick={() => updateReviewStatus('mandatory', sourceIndex, 'approved')}
@@ -959,7 +1086,7 @@ const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, on
                       <div 
                         key={`alarm-f-${idx}`} 
                         id={`alarm-f-${idx}`}
-                        className={`bg-white rounded-2xl border overflow-hidden shadow-sm flex flex-col transition-all duration-300 relative ${
+                        className={`issue-card bg-white rounded-2xl border overflow-hidden shadow-sm flex flex-col transition-all duration-300 relative ${
                           isRejected ? 'border-slate-200 grayscale opacity-60' : 'border-red-100'
                         }`}
                         data-review-status={issue.reviewStatus || 'pending'}
@@ -1026,7 +1153,7 @@ const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, on
                           </div>
 
                           {/* 5. 人工手检模块 */}
-                          <div className="pt-2 border-t border-slate-100">
+                          <div className="review-module pt-2 border-t border-slate-100">
                              <div className="flex gap-2">
                                <button 
                                  onClick={() => updateReviewStatus('forbidden', sourceIndex, 'approved')}
@@ -1219,16 +1346,39 @@ const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, on
                   <div className="p-4 text-center text-slate-400 text-xs">无达标项</div>
                 ) : (
                   <div className="divide-y divide-slate-100">
-                    {passedMandatory.map((check, idx) => (
-                      <div key={idx} className="px-5 py-3 flex items-start gap-3">
-                        <div className="mt-0.5 text-blue-500 shrink-0">
-                          <Check size={14} strokeWidth={3} />
+                    {passedMandatory.map((check, idx) => {
+                      const sourceIndex = activeRound === 'round1' 
+                        ? localResult.round1.mandatory_checks.indexOf(check)
+                        : (localResult.round2?.mandatory_checks.indexOf(check) ?? -1);
+                      
+                      return (
+                        <div key={idx} className="px-5 py-4 space-y-3">
+                          <div className="flex items-start gap-3">
+                            <div className="mt-0.5 text-emerald-500 shrink-0">
+                              <Check size={14} strokeWidth={3} />
+                            </div>
+                            <div className="flex-1">
+                              <span className="text-sm text-slate-700 font-bold block">{check.standard}</span>
+                            </div>
+                          </div>
+                          
+                          {/* 达标项也展示明细，支持核减 */}
+                          <div className="pl-6">
+                            {(() => {
+                              const { score, elements } = parseDiagnosisLines(check.comment);
+                              return elements.length > 0 && (
+                                <DiagnosisDisplay 
+                                  score={score} 
+                                  elements={elements} 
+                                  elementStates={check.elementStates}
+                                  onElementCheck={(elId, state) => updateElementState(sourceIndex, elId, state)}
+                                />
+                              );
+                            })()}
+                          </div>
                         </div>
-                        <div className="flex-1">
-                          <span className="text-sm text-slate-700 font-bold block">{check.standard}</span>
-                        </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </div>

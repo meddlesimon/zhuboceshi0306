@@ -36,6 +36,7 @@ export interface MandatoryCheck {
   theoreticalPercent?: string; // 理论占比位置 (e.g. 15.2%)
   searchRange?: string;      // 实际搜索的视窗范围坐标
   searchRound?: string;      // 搜索轮次 (初次 vs 扩容)
+  elementStates?: Record<string, 'correct' | 'wrong'>; // 新增：核心要素的人工手检状态
 }
 
 export interface AnalysisResult {

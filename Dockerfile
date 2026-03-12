@@ -11,8 +11,8 @@ COPY dist ./dist
 # 3. 拷贝后端服务文件
 COPY server.js ./
 
-# 4. 如果有 .env 文件也拷贝进去
-COPY .env ./
+# 4. 环境配置 (变量已在 docker-compose 中定义)
+# COPY .env ./
 
 EXPOSE 3000
 CMD ["node", "server.js"]
