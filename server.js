@@ -158,25 +158,21 @@ app.post('/api/check-single-window', async (req, res) => {
   // 第一阶段：狗仔队（纯粹寻找证据）直接提取物理原文
   const prompt1_broad = `
     【任务：物理证据提取】
-    你的唯一目标是：在【待检索视窗（6000字）】中，精准抠出主播讲解【标准话术】内容的**完整原话片段**。
+    你是一个极其敏锐的话术匹配员。
+    你的目标是：在【待检索视窗（6000字）】中，对比【质检重点】和【标准话术】，找出意思比较相近的一个或多个段落。
     
-    【重要背景（绝对服从）】
-    因为直播流程有极强的管控，主播**必定**在这 6000 字的视窗内试图表达过该内容。
-    
-    【标准话术】
-    "${standardContent}"
-    
-    【待检索视窗】
-    ${windowText}
+    【执行原则】
+    1. 语义匹配：只要大概意思相似就行了，不需要完全一致。
+    2. 长度不限：无论主播说得长还是短，只要有关联就完整抠出来。
+    3. 100%原话：你必须从【待检索视窗】中搬运原话，严禁润色、严禁总结、严禁自己造句。
+    4. 允许 ASR 误差：考虑到语音转文字可能有同音错别字（如“学而思”变“学而死”），只要语义逻辑对齐即可。
 
-    【执行规则（最高优先级）】
-    1. 逻辑锚点提取：你必须从【待检索视窗】中，将主播讲解该话题的整段文字提取出来。
-    2. 允许 ASR 误差：考虑到转写文本可能存在同音错别字或断句问题，请优先保证语义逻辑的对齐。
-    3. 物理搬运：提取的内容必须是视窗中真实存在的原始文本，严禁自行总结或润色。
-    4. 搬运长度：标准话术长度为 ${standardContent.length}，请你抠出约 ${targetLength} 字左右的连续原话。
-    5. 语义完整：请根据语义完整性灵活截取。若为了保证逻辑连贯（如说完一整句话），允许实际长度略微超出 ${targetLength} 字。
+    【输入信息】
+    - 质检重点：${ruleName}
+    - 标准话术："${standardContent}"
+    - 待检索视窗：${windowText}
 
-    【输出 JSON 格式（严禁返回其他多余内容）】
+    【输出 JSON 格式（严禁返回其他内容）】
     {
       "physical_evidence": "此处为您从视窗中提取的原始片段"
     }
@@ -187,17 +183,12 @@ app.post('/api/check-single-window', async (req, res) => {
     const result1Text = await callGemini(prompt1_broad);
     const result1 = safeJsonParse(result1Text);
 
-    // 直接使用 AI 提取出来的物理证据，不再进行 indexOf 搜寻
-    let topicScene = result1.physical_evidence || "";
+    // 直接使用 AI 提取出来的物理证据，不再进行 800 字兜底
+    const topicScene = result1.physical_evidence || "";
     
-    if (!topicScene || topicScene.length < 10) {
-      console.warn(`>>> [API/check-single-window] Extraction failed or too short. Falling back to start of window.`);
-      topicScene = windowText.substring(0, 800);
-    } else {
-      console.log(`>>> [API/check-single-window] Physical evidence extracted directly. Length: ${topicScene.length}`);
-    }
+    console.log(`>>> [API/check-single-window] Physical evidence extracted. Length: ${topicScene.length}`);
 
-    // 核心证据：按用户要求，后续以这个物理证据为准进行评分
+    // 核心证据：作为后续评分的唯一依据
     const coreEvidence = topicScene;
 
     // 第二阶段：裁判员（根据提取的纯净物理证据进行打分）
