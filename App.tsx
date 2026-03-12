@@ -33,6 +33,7 @@ const App: React.FC = () => {
   const [result, setResult] = useState<MultiRoundResult | null>(null);
   const [candidateAnchors, setCandidateAnchors] = useState<AnchorResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [headerActions, setHeaderActions] = useState<React.ReactNode>(null);
   
   const [standardsFileName, setStandardsFileName] = useState<string>('');
   const [metadata, setMetadata] = useState<StreamMetadata>({
@@ -226,6 +227,7 @@ const App: React.FC = () => {
     setError(null);
     setPasteContent('');
     setIsDualRound(true); // Reset to true as it is now the default
+    setHeaderActions(null);
   };
 
   // Helper to count Importance
@@ -235,7 +237,7 @@ const App: React.FC = () => {
   return (
     <div className="min-h-screen bg-slate-100 font-sans text-slate-900 flex justify-center print:bg-white print:h-auto overflow-x-hidden">
       <div className={`w-full bg-white min-h-screen shadow-2xl flex flex-col relative print:max-w-none print:shadow-none print:min-h-0 transition-all duration-500 ease-in-out ${step === AppStep.REPORT ? 'max-w-none' : 'max-w-[600px]'}`}>
-        <Header />
+        <Header actionSlot={step === AppStep.REPORT ? headerActions : undefined} />
 
         <main className="flex-1 overflow-y-auto print:overflow-visible">
           {step === AppStep.LOGIN && (
@@ -582,7 +584,7 @@ const App: React.FC = () => {
           </div>
 
           {step === AppStep.REPORT && result && (
-             <ReportView result={result} standards={standards} metadata={metadata} onReset={resetApp} />
+             <ReportView result={result} standards={standards} metadata={metadata} onReset={resetApp} onRegisterActions={setHeaderActions} />
           )}
         </main>
       </div>

@@ -43,6 +43,7 @@ interface ReportViewProps {
   standards: Standard[];
   metadata: StreamMetadata;
   onReset: () => void;
+  onRegisterActions?: (actions: React.ReactNode) => void;
 }
 
 
@@ -202,7 +203,7 @@ const ExpandableText: React.FC<{ text: string, maxLen?: number, className?: stri
   );
 };
 
-const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, onReset }) => {
+const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, onReset, onRegisterActions }) => {
   const [isExporting, setIsExporting] = useState(false);
   const [activeRound, setActiveRound] = useState<'round1' | 'round2'>('round1');
   const [highlightQuote, setHighlightQuote] = useState<string>('');
@@ -223,6 +224,59 @@ const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, on
 
   const reportRef = useRef<HTMLDivElement>(null);
   const transcriptRef = useRef<HTMLDivElement>(null);
+
+  // 把 Header 区域的操作按钮注册给父组件（App），由父组件渲染到全局 Header 里
+  useEffect(() => {
+    if (!onRegisterActions) return;
+    onRegisterActions(
+      <>
+        {/* 双轮模式：轮次切换直接嵌入导航栏 */}
+        {result.isDualMode && (
+          <>
+            <div className="bg-slate-100 p-0.5 rounded-lg flex">
+              <button
+                onClick={() => { setActiveRound('round1'); setHighlightQuote(''); }}
+                className={`px-3 py-1 text-[11px] font-bold rounded-md transition-all ${activeRound === 'round1' ? 'bg-white shadow-sm text-blue-600' : 'text-slate-500 hover:text-slate-700'}`}
+              >
+                第一轮
+              </button>
+              <button
+                onClick={() => { setActiveRound('round2'); setHighlightQuote(''); }}
+                className={`px-3 py-1 text-[11px] font-bold rounded-md transition-all ${activeRound === 'round2' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-500 hover:text-slate-700'}`}
+              >
+                第二轮
+              </button>
+            </div>
+            <div className="h-4 w-px bg-slate-200" />
+          </>
+        )}
+        <button
+          onClick={onReset}
+          className="border border-slate-200 bg-white text-slate-600 hover:text-slate-900 hover:bg-slate-50 px-3 py-1.5 rounded-lg font-bold flex items-center gap-1.5 transition-all active:scale-95 text-xs shadow-sm"
+        >
+          <RotateCcw size={13} />
+          <span>新一轮</span>
+        </button>
+        <div className="h-4 w-px bg-slate-200" />
+        <button
+          onClick={handleExportChecklist}
+          className="bg-green-600 hover:bg-green-700 text-white px-3 py-1.5 rounded-lg font-bold flex items-center gap-1.5 shadow-md transition-all active:scale-95 text-xs"
+        >
+          <FileSpreadsheet size={13} />
+          <span>导出清单</span>
+        </button>
+        <button
+          onClick={handleExportPDF}
+          disabled={isExporting}
+          className={`bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-lg font-bold flex items-center gap-1.5 shadow-md transition-all active:scale-95 text-xs ${isExporting ? 'opacity-75 cursor-wait' : ''}`}
+        >
+          {isExporting ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
+          <span>导出 PDF</span>
+        </button>
+      </>
+    );
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isExporting, activeRound, result.isDualMode, onReset, onRegisterActions]);
 
   // Sync props to local state if props change (re-analysis)
   useEffect(() => {
@@ -958,61 +1012,10 @@ const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, on
   };
 
   return (
-    <div className="pb-24 animate-in slide-in-from-bottom-8 fade-in duration-500 bg-slate-50 min-h-screen">
+    <div className="pb-4 animate-in slide-in-from-bottom-8 fade-in duration-500 bg-slate-50 min-h-screen">
       
-      {/* 1. Control Header */}
-      <div className="bg-white border-b border-slate-200 px-4 md:px-6 py-3 md:py-4 shadow-sm sticky top-0 z-30 flex flex-row justify-between items-center print:hidden">
-        
-        <button
-          onClick={onReset}
-          className="border border-slate-200 bg-white text-slate-600 hover:text-slate-900 hover:bg-slate-50 px-3 py-2 md:px-4 rounded-lg font-bold flex items-center gap-2 transition-all active:scale-95 text-xs md:text-sm shadow-sm"
-        >
-          <RotateCcw size={16} />
-          <span>新一轮</span>
-        </button>
-        
-        <div className="flex gap-2">
-            <button 
-              onClick={handleExportChecklist}
-              className="bg-green-600 hover:bg-green-700 text-white px-3 py-2 md:px-4 rounded-lg font-bold flex items-center gap-2 shadow-lg transition-all active:scale-95 text-xs md:text-sm"
-            >
-              <FileSpreadsheet size={16} />
-              <span>导出清单</span>
-            </button>
-
-            <button 
-              onClick={handleExportPDF}
-              disabled={isExporting}
-              className={`bg-blue-600 hover:bg-blue-700 text-white px-3 py-2 md:px-4 rounded-lg font-bold flex items-center gap-2 shadow-lg transition-all active:scale-95 text-xs md:text-sm ${isExporting ? 'opacity-75 cursor-wait' : ''}`}
-            >
-              {isExporting ? <Loader2 size={16} className="animate-spin" /> : <Download size={16} />}
-              <span>导出 PDF 报告</span>
-            </button>
-        </div>
-      </div>
-      
-      {/* 2. Round Switcher */}
-      {result.isDualMode && (
-        <div className="bg-white p-2 flex justify-center border-b border-slate-100 sticky top-[60px] z-20 print:hidden">
-           <div className="bg-slate-100 p-1 rounded-xl flex w-full max-w-sm">
-             <button 
-               onClick={() => { setActiveRound('round1'); setHighlightQuote(''); }}
-               className={`flex-1 py-2 text-sm font-bold rounded-lg flex items-center justify-center gap-2 transition-all ${activeRound === 'round1' ? 'bg-white shadow-sm text-blue-600' : 'text-slate-500 hover:text-slate-700'}`}
-             >
-               第一轮质检
-             </button>
-             <button 
-               onClick={() => { setActiveRound('round2'); setHighlightQuote(''); }}
-               className={`flex-1 py-2 text-sm font-bold rounded-lg flex items-center justify-center gap-2 transition-all ${activeRound === 'round2' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-500 hover:text-slate-700'}`}
-             >
-               第二轮质检
-             </button>
-           </div>
-        </div>
-      )}
-
-      {/* 3. 并排布局区域：硬锁定高度，禁止全局滚动 */}
-      <div className={`flex justify-start items-start gap-6 px-4 py-4 mx-auto transition-all duration-500 overflow-hidden h-[calc(100vh-130px)] ${showAdminAudit ? 'max-w-full w-full' : 'max-w-[600px] justify-center'}`}>
+      {/* 并排布局区域：顶部只有 44px 导航栏，内容区始终最大化 */}
+      <div className={`flex justify-start items-start gap-6 px-4 py-2 mx-auto transition-all duration-500 overflow-hidden h-[calc(100vh-44px)] ${showAdminAudit ? 'max-w-full w-full' : 'max-w-[600px] justify-center'}`}>
         
         {/* 左侧：质检报告 - 宽度锁定，独立滚动，绝不动弹 */}
         <div 
