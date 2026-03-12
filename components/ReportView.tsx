@@ -27,7 +27,11 @@ import {
   Layout,
   Activity,
   Split,
-  XCircle as XCircleIcon
+  XCircle as XCircleIcon,
+  FileSearch,
+  ChevronUp,
+  ChevronDown,
+  MousePointer2
 } from 'lucide-react';
 import AdminAuditView from './AdminAuditView';
 
@@ -202,9 +206,17 @@ const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, on
   const [isExporting, setIsExporting] = useState(false);
   const [activeRound, setActiveRound] = useState<'round1' | 'round2'>('round1');
   const [highlightQuote, setHighlightQuote] = useState<string>('');
+  const [scrollToggle, setScrollToggle] = useState(0); // 新增：用于强制触发滚动定位
   const [showBackToTop, setShowBackToTop] = useState(false);
   const [lastClickedId, setLastClickedId] = useState<string | null>(null); // 新增：记录跳转来源 ID
-  const [showAdminAudit, setShowAdminAudit] = useState(false); // 新增：管理员核对页面开关
+  const [showAdminAudit, setShowAdminAudit] = useState(false); // 控制右侧面板显示
+  const [rightPanelTab, setRightPanelTab] = useState<'audit' | 'transcript'>('audit'); // 右侧面板模式切换
+
+  // --- 主播全文搜索与进度状态 ---
+  const [searchTerm, setSearchTerm] = useState('');
+  const [searchMatches, setSearchMatches] = useState<number[]>([]); 
+  const [currentMatchIndex, setCurrentMatchIndex] = useState(-1);
+  const [scrollPercent, setScrollPercent] = useState(0);
   
   // Local State for Reviews
   const [localResult, setLocalResult] = useState<MultiRoundResult>(result);
@@ -237,23 +249,43 @@ const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, on
   const fullRawTranscript = localResult.fullRawText || (localResult.round1Text + (localResult.round2Text || ''));
 
   useEffect(() => {
-    if (highlightQuote && transcriptRef.current) {
-      setTimeout(() => {
+    if (showAdminAudit && highlightQuote && transcriptRef.current) {
+      // 增加延迟，确保面板展开后再执行定位
+      const timer = setTimeout(() => {
         const highlightEl = transcriptRef.current?.querySelector('.highlight-active');
         if (highlightEl) {
-          highlightEl.scrollIntoView({ behavior: 'auto', block: 'center' });
+          highlightEl.scrollIntoView({ 
+            behavior: 'smooth', 
+            block: 'center' 
+          });
         }
-      }, 50);
+      }, 300);
+      return () => clearTimeout(timer);
     }
-  }, [highlightQuote, activeRound]);
+  }, [highlightQuote, activeRound, scrollToggle, showAdminAudit]);
 
   const handleQuoteClick = (quote: string, id: string) => {
     if (!quote || quote.length < 2) return;
-    setHighlightQuote(quote);
-    setLastClickedId(id); // 记录是哪个规则触发的跳转
-    if (transcriptRef.current) {
-        transcriptRef.current.scrollIntoView({ behavior: 'auto' });
+    
+    // 强制打开右侧面板（先于定位逻辑）
+    setShowAdminAudit(true);
+    setRightPanelTab('transcript');
+
+    // 自动判定轮次
+    if (id.includes('anchor-r2') || id.includes('r2')) {
+      setActiveRound('round2');
+    } else if (id.includes('anchor-r1') || id.includes('r1')) {
+      setActiveRound('round1');
     }
+
+    setHighlightQuote(quote);
+    setScrollToggle(prev => prev + 1); // 触发定位
+    setLastClickedId(id); 
+    
+    // 清空搜索干扰
+    setSearchTerm('');
+    setSearchMatches([]);
+    setCurrentMatchIndex(-1);
   };
 
   /**
@@ -801,39 +833,128 @@ const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, on
     );
   };
 
+  /**
+   * 增强型文本渲染逻辑：支持 AI 高亮 + 搜索高亮 + 瞬间定位
+   */
   const renderHighlightedTranscript = () => {
-     if (!highlightQuote) return fullRawTranscript;
-     const match = findBestMatch(fullRawTranscript, highlightQuote);
-     if (!match.found) {
-       return (
-         <>
-           <div className="absolute top-4 right-4 bg-orange-100 text-orange-700 text-xs px-3 py-1.5 rounded-full flex items-center gap-1 shadow-sm border border-orange-200 animate-pulse z-10">
-             <AlertTriangle size={12} />
-             定位失败
-           </div>
-           {fullRawTranscript}
-         </>
-       );
-     }
-     const { start, end, method } = match;
-     const isFuzzy = method !== 'exact';
-     const badgeColor = method.includes('anchor') ? 'bg-yellow-100 text-yellow-700' : 'bg-blue-100 text-blue-700';
-     const badgeText = method === 'exact' ? '精确' : '模糊';
+    const fullText = activeRound === 'round1' ? localResult.round1Text : (localResult.round2Text || localResult.round1Text);
+    if (!fullText) return "暂无原文数据";
 
-     return (
-       <>
-         {isFuzzy && (
-           <div className={`absolute top-4 right-4 ${badgeColor} text-xs px-2 py-1 rounded-full flex items-center gap-1 shadow-sm border z-10 opacity-75`}>
-             <Search size={10} /> {badgeText}
-           </div>
-         )}
-         {fullRawTranscript.substring(0, start)}
-         <span id="highlight-target" className="bg-yellow-200 text-slate-900 font-bold px-1 rounded mx-0.5 border-b-2 border-yellow-400 shadow-sm highlight-active">
-           {fullRawTranscript.substring(start, end)}
-         </span>
-         {fullRawTranscript.substring(end)}
-       </>
-     );
+    // 1. 处理 AI 定位 (黄底)
+    let aiMatch = { start: -1, end: -1 };
+    if (highlightQuote) {
+      const match = findBestMatch(fullText, highlightQuote);
+      if (match.found) {
+        aiMatch = { start: match.start, end: match.end };
+      }
+    }
+
+    // 2. 处理搜索匹配 (浅蓝)
+    const matches: { start: number; end: number; isCurrent: boolean }[] = [];
+    if (searchTerm && searchTerm.length >= 1) {
+      let pos = 0;
+      const lowerFull = fullText.toLowerCase();
+      const lowerSearch = searchTerm.toLowerCase();
+      while ((pos = lowerFull.indexOf(lowerSearch, pos)) !== -1) {
+        matches.push({
+          start: pos,
+          end: pos + searchTerm.length,
+          isCurrent: matches.length === currentMatchIndex
+        });
+        pos += searchTerm.length;
+      }
+    }
+
+    // 3. 混合渲染逻辑
+    const elements: React.ReactNode[] = [];
+    let lastIdx = 0;
+
+    // 将所有需要高亮的区间合并排序
+    const allIntervals: { start: number; end: number; type: 'ai' | 'search'; isCurrent?: boolean; searchIdx?: number }[] = [];
+    if (aiMatch.start !== -1) allIntervals.push({ ...aiMatch, type: 'ai' });
+    matches.forEach((m, idx) => allIntervals.push({ ...m, type: 'search', searchIdx: idx }));
+    
+    allIntervals.sort((a, b) => a.start - b.start || b.end - a.end);
+
+    allIntervals.forEach((interval, i) => {
+      // 填充之前的普通文本
+      if (interval.start > lastIdx) {
+        elements.push(fullText.substring(lastIdx, interval.start));
+      }
+      
+      // 避免重复渲染
+      if (interval.start < lastIdx) return;
+
+      const content = fullText.substring(interval.start, interval.end);
+      if (interval.type === 'ai') {
+        elements.push(
+          <span key={`ai-${i}`} id="ai-highlight" className="bg-yellow-200 text-slate-900 font-bold px-0.5 rounded border-b-2 border-yellow-400 highlight-active">
+            {content}
+          </span>
+        );
+      } else {
+        const isCurrent = interval.searchIdx === currentMatchIndex;
+        elements.push(
+          <span 
+            key={`search-${i}`} 
+            id={`search-match-${interval.searchIdx}`}
+            className={`px-0.5 rounded transition-colors ${isCurrent ? 'bg-orange-500 text-white ring-2 ring-orange-300 z-10' : 'bg-blue-100 text-blue-800 border-b border-blue-300'}`}
+          >
+            {content}
+          </span>
+        );
+      }
+      lastIdx = interval.end;
+    });
+
+    if (lastIdx < fullText.length) {
+      elements.push(fullText.substring(lastIdx));
+    }
+
+    return <>{elements}</>;
+  };
+
+  // --- 搜索逻辑 ---
+  useEffect(() => {
+    if (!searchTerm) {
+      setSearchMatches([]);
+      setCurrentMatchIndex(-1);
+      return;
+    }
+    const fullText = activeRound === 'round1' ? localResult.round1Text : (localResult.round2Text || localResult.round1Text);
+    const lowerFull = fullText.toLowerCase();
+    const lowerSearch = searchTerm.toLowerCase();
+    const indices: number[] = [];
+    let pos = 0;
+    while ((pos = lowerFull.indexOf(lowerSearch, pos)) !== -1) {
+      indices.push(pos);
+      pos += searchTerm.length;
+    }
+    setSearchMatches(indices);
+    if (indices.length > 0) {
+      setCurrentMatchIndex(0);
+    } else {
+      setCurrentMatchIndex(-1);
+    }
+  }, [searchTerm, activeRound]);
+
+  // 跳转逻辑 (瞬间跳转)
+  const jumpToMatch = (index: number) => {
+    if (index < 0 || index >= searchMatches.length) return;
+    setCurrentMatchIndex(index);
+    setTimeout(() => {
+      const el = document.getElementById(`search-match-${index}`);
+      if (el) {
+        el.scrollIntoView({ behavior: 'auto', block: 'center' });
+      }
+    }, 10);
+  };
+
+  const handleTranscriptScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    const { scrollTop, scrollHeight, clientHeight } = e.currentTarget;
+    if (scrollHeight > clientHeight) {
+      setScrollPercent((scrollTop / (scrollHeight - clientHeight)) * 100);
+    }
   };
 
   return (
@@ -851,15 +972,6 @@ const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, on
         </button>
         
         <div className="flex gap-2">
-            <button 
-              onClick={() => setShowAdminAudit(!showAdminAudit)}
-              className={`${showAdminAudit ? 'bg-slate-800' : 'bg-orange-500'} hover:opacity-90 text-white px-3 py-2 md:px-4 rounded-lg font-bold flex items-center gap-2 shadow-lg transition-all active:scale-95 text-xs md:text-sm`}
-            >
-              <Layout size={16} />
-              <span className="hidden sm:inline">{showAdminAudit ? '关闭核对台' : '打开核对台'}</span>
-              <span className="sm:hidden">核对</span>
-            </button>
-
             <button 
               onClick={handleExportChecklist}
               className="bg-green-600 hover:bg-green-700 text-white px-3 py-2 md:px-4 rounded-lg font-bold flex items-center gap-2 shadow-lg transition-all active:scale-95 text-xs md:text-sm"
@@ -899,14 +1011,14 @@ const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, on
         </div>
       )}
 
-      {/* 3. 并排布局区域：动态调整容器最大宽度 */}
-      <div className={`flex justify-center items-start gap-6 px-4 py-8 mx-auto transition-all duration-500 ${showAdminAudit ? 'max-w-[1440px] w-full' : 'max-w-[600px]'}`}>
+      {/* 3. 并排布局区域：硬锁定高度，禁止全局滚动 */}
+      <div className={`flex justify-start items-start gap-6 px-4 py-4 mx-auto transition-all duration-500 overflow-hidden h-[calc(100vh-130px)] ${showAdminAudit ? 'max-w-full w-full' : 'max-w-[600px] justify-center'}`}>
         
-        {/* 左侧：质检报告 - 始终保持 420px 左右的手机宽度 */}
+        {/* 左侧：质检报告 - 宽度锁定，独立滚动，绝不动弹 */}
         <div 
           id="report-content" 
           ref={reportRef} 
-          className={`bg-white transition-all duration-500 shadow-xl rounded-2xl overflow-hidden w-full max-w-[600px] shrink-0 p-8 md:p-10 min-h-screen`}
+          className={`bg-white transition-all duration-300 shadow-xl rounded-2xl w-[600px] shrink-0 p-8 md:p-10 h-full overflow-y-auto custom-scrollbar ${!showAdminAudit ? 'mx-auto' : 'ml-4'}`}
         >
           {/* METADATA HEADER */}
           <div className="mb-8 border-b-2 border-slate-900 pb-6">
@@ -1498,51 +1610,144 @@ const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, on
             </div>
           </div>
           
-          <div id="transcript-section" className="mt-16 pt-10 border-t-4 border-slate-200 animate-in fade-in duration-700">
-            <div className="flex items-center gap-2 mb-6">
-              <div className="bg-slate-200 p-2 rounded-lg text-slate-700">
-                 <FileText size={20} />
-              </div>
-              <div>
-                 <h3 className="text-xl font-black text-slate-900">逐字稿复盘</h3>
-                 <p className="text-sm text-slate-500">
-                   {highlightQuote 
-                     ? "已定位至选中原话，背景高亮显示" 
-                     : "点击上方报告中的“主播原话”可快速定位"}
-                 </p>
-              </div>
-            </div>
-            <div ref={transcriptRef} className="bg-slate-50 rounded-xl p-6 md:p-8 font-mono text-sm leading-loose text-slate-600 border border-slate-200 whitespace-pre-wrap relative">
-               {renderHighlightedTranscript()}
-            </div>
-          </div>
-
           <div className="mt-12 pt-6 border-t border-slate-100 text-center text-slate-400 text-xs font-mono">
             StreamScript QA 智能质检 • {new Date().toLocaleDateString()}
           </div>
         </div>
 
-      {/* 4. 核对台面板 - 调整高度为 3 倍并允许拉伸 */}
+      {/* 4. 右侧多功能面板 - 移除 sticky，改用容器内高度铺满 */}
       {showAdminAudit && (
-        <div className="flex-1 min-w-[600px] sticky top-[80px] min-h-[1800px] flex flex-col animate-in slide-in-from-right-10 duration-500 print:hidden">
-          <div className="bg-white rounded-2xl border-2 border-orange-200 shadow-2xl overflow-hidden flex flex-col min-h-[1800px]">
-            <div className="bg-orange-500 p-4 text-white flex justify-between items-center shrink-0">
+        <div className="flex-1 min-w-[600px] h-full flex flex-col animate-in slide-in-from-right-10 duration-500 print:hidden overflow-hidden">
+          <div className={`bg-white rounded-2xl border-2 shadow-2xl overflow-hidden flex flex-col h-full flex-1 ${rightPanelTab === 'audit' ? 'border-orange-200' : 'border-blue-200'}`}>
+            
+            {/* 动态 Header */}
+            <div className={`${rightPanelTab === 'audit' ? 'bg-orange-500' : 'bg-blue-600'} p-4 text-white flex justify-between items-center shrink-0`}>
               <div className="flex items-center gap-2">
-                <Activity size={18} />
-                <h3 className="font-bold">AI 案发现场 (指令核对)</h3>
+                {rightPanelTab === 'audit' ? <Activity size={18} /> : <FileText size={18} />}
+                <h3 className="font-bold">{rightPanelTab === 'audit' ? 'AI 案发现场 (指令核对)' : '主播全文 (逐字稿复盘)'}</h3>
               </div>
-              <button onClick={() => setShowAdminAudit(false)} className="hover:rotate-90 transition-transform">
-                <XCircleIcon size={20} />
-              </button>
+              <div className="flex items-center gap-3">
+                 <div className="bg-black/20 rounded-lg p-0.5 flex">
+                    <button 
+                      onClick={() => setRightPanelTab('audit')}
+                      className={`px-3 py-1 text-[10px] font-bold rounded transition-all ${rightPanelTab === 'audit' ? 'bg-white text-orange-600 shadow-sm' : 'text-white/70 hover:text-white'}`}
+                    >核对</button>
+                    <button 
+                      onClick={() => setRightPanelTab('transcript')}
+                      className={`px-3 py-1 text-[10px] font-bold rounded transition-all ${rightPanelTab === 'transcript' ? 'bg-white text-blue-600 shadow-sm' : 'text-white/70 hover:text-white'}`}
+                    >全文</button>
+                 </div>
+                 <button onClick={() => setShowAdminAudit(false)} className="hover:rotate-90 transition-transform">
+                   <XCircleIcon size={20} />
+                 </button>
+              </div>
             </div>
-            <div className="flex-1 overflow-hidden">
-              <AdminAuditView 
-                result={localResult} 
-                onBack={() => setShowAdminAudit(false)} 
-                isSidebar={true} 
-                externalRound={activeRound}
-                onRoundChange={setActiveRound}
-              />
+
+            <div className="flex-1 overflow-hidden flex flex-col">
+              {rightPanelTab === 'audit' ? (
+                <AdminAuditView 
+                  result={localResult} 
+                  onBack={() => setShowAdminAudit(false)} 
+                  isSidebar={true} 
+                  externalRound={activeRound}
+                  onRoundChange={setActiveRound}
+                />
+              ) : (
+                <div className="flex-1 flex flex-col h-full relative">
+                  {/* 置顶搜索栏与切换 */}
+                  <div className="sticky top-0 z-20 bg-white border-b border-slate-100 shadow-sm">
+                    {/* 1. 轮次切换 */}
+                    {result.isDualMode && (
+                      <div className="p-2 flex gap-1 bg-slate-50/50">
+                        <button 
+                          onClick={() => setActiveRound('round1')}
+                          className={`flex-1 py-1.5 text-[10px] font-black rounded border transition-all ${activeRound === 'round1' ? 'bg-blue-600 border-blue-600 text-white' : 'bg-white text-slate-400 border-slate-200 hover:border-blue-200'}`}
+                        >第一轮原文</button>
+                        <button 
+                          onClick={() => setActiveRound('round2')}
+                          className={`flex-1 py-1.5 text-[10px] font-black rounded border transition-all ${activeRound === 'round2' ? 'bg-blue-600 border-blue-600 text-white' : 'bg-white text-slate-400 border-slate-200 hover:border-blue-200'}`}
+                        >第二轮原文</button>
+                      </div>
+                    )}
+                    
+                    {/* 2. 搜索工具栏 */}
+                    <div className="p-3 flex items-center gap-2 bg-white">
+                      <div className="relative flex-1">
+                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+                        <input 
+                          type="text" 
+                          value={searchTerm}
+                          onChange={(e) => setSearchTerm(e.target.value)}
+                          placeholder="搜索全文关键字..."
+                          className="w-full pl-9 pr-4 py-2 bg-slate-100 border-none rounded-xl text-sm focus:ring-2 focus:ring-blue-500 transition-all font-medium"
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') jumpToMatch((currentMatchIndex + 1) % searchMatches.length);
+                          }}
+                        />
+                      </div>
+                      
+                      {searchTerm && (
+                        <div className="flex items-center gap-1 shrink-0">
+                          <span className="text-[10px] font-black text-slate-400 mr-1">
+                            {searchMatches.length > 0 ? `${currentMatchIndex + 1} / ${searchMatches.length}` : '0 匹配'}
+                          </span>
+                          <button 
+                            onClick={() => jumpToMatch((currentMatchIndex - 1 + searchMatches.length) % searchMatches.length)}
+                            className="p-2 hover:bg-slate-100 rounded-lg text-slate-600 transition-colors"
+                          >
+                            <ChevronUp size={16} />
+                          </button>
+                          <button 
+                            onClick={() => jumpToMatch((currentMatchIndex + 1) % searchMatches.length)}
+                            className="p-2 hover:bg-slate-100 rounded-lg text-slate-600 transition-colors"
+                          >
+                            <ChevronDown size={16} />
+                          </button>
+                          <button 
+                            onClick={() => setSearchTerm('')}
+                            className="p-2 hover:bg-red-50 text-slate-400 hover:text-red-500 rounded-lg transition-colors"
+                          >
+                            <RotateCcw size={14} />
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* 逐字稿内容区 - 填满并独立滚动 */}
+                  <div className="flex-1 relative flex overflow-hidden h-full">
+                    <div 
+                      ref={transcriptRef}
+                      onScroll={handleTranscriptScroll}
+                      className="flex-1 overflow-y-auto p-8 font-mono text-sm leading-[1.8] text-slate-600 whitespace-pre-wrap selection:bg-blue-200 selection:text-blue-900 scroll-smooth bg-white h-full"
+                    >
+                       {renderHighlightedTranscript()}
+                    </div>
+
+                    {/* 右侧热力进度条 */}
+                    <div className="w-2.5 bg-slate-50 border-l border-slate-100 relative shrink-0 z-10">
+                      {/* 搜索结果热力图 */}
+                      {searchMatches.map((pos, i) => {
+                        const fullText = activeRound === 'round1' ? localResult.round1Text : (localResult.round2Text || localResult.round1Text);
+                        const top = (pos / fullText.length) * 100;
+                        return (
+                          <div 
+                            key={i}
+                            className={`absolute left-0 w-full h-0.5 ${i === currentMatchIndex ? 'bg-orange-500 z-10 h-1' : 'bg-blue-400 opacity-60'}`}
+                            style={{ top: `${top}%` }}
+                          />
+                        );
+                      })}
+                      
+                      {/* 滚动条滑块 */}
+                      <div 
+                        className="absolute left-0 w-full bg-slate-300/40 rounded-full border border-slate-400/20"
+                        style={{ top: `${scrollPercent}%`, height: '40px' }}
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         </div>

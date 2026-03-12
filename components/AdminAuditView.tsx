@@ -47,7 +47,7 @@ const AnchorCard: React.FC<{
         </span>
       )}
     </div>
-    <div className={`rounded-2xl mb-4 font-bold leading-relaxed italic ${isSidebar ? 'p-4 text-base' : 'p-6 text-xl'} ${isCore ? 'bg-indigo-50 text-indigo-900' : 'bg-slate-50 text-slate-700'}`}>
+    <div className={`rounded-2xl mb-4 font-bold leading-relaxed italic ${isSidebar ? 'p-4 text-sm' : 'p-6 text-xl'} ${isCore ? 'bg-indigo-50 text-indigo-900' : 'bg-slate-50 text-slate-700'}`}>
       “{phrase}”
     </div>
     <div className="flex items-center gap-2 text-[10px] font-bold text-slate-400">
@@ -78,7 +78,7 @@ const FullTextWithHighlight: React.FC<{
 
   if (!highlightRange || highlightRange.start === -1) {
     return (
-      <div className="bg-white rounded-2xl p-8 border-2 border-slate-200 text-slate-700 leading-loose whitespace-pre-wrap font-medium">
+      <div className="bg-white rounded-2xl p-6 border-2 border-slate-200 text-slate-700 leading-relaxed whitespace-pre-wrap font-medium">
         {text}
       </div>
     );
@@ -89,7 +89,7 @@ const FullTextWithHighlight: React.FC<{
   const after = text.substring(highlightRange.end);
 
   return (
-    <div ref={containerRef} className="bg-white rounded-2xl p-8 border-2 border-slate-200 text-slate-700 leading-loose whitespace-pre-wrap font-medium relative">
+    <div ref={containerRef} className="bg-white rounded-2xl p-6 border-2 border-slate-200 text-slate-700 leading-relaxed whitespace-pre-wrap font-medium relative">
       {before}
       <span 
         data-highlight-id={highlightId}
@@ -222,7 +222,7 @@ const AdminAuditView: React.FC<AdminAuditViewProps> = ({
   const passedCount = currentChecks.filter(c => c?.status === 'passed').length;
 
   return (
-    <div ref={scrollContainerRef} className={`${isSidebar ? 'bg-white h-full overflow-y-auto' : 'bg-slate-50 min-h-screen'} pb-20 custom-scrollbar`}>
+    <div className={`${isSidebar ? 'bg-white h-full flex flex-col overflow-hidden' : 'bg-slate-50 min-h-screen'} custom-scrollbar`}>
       {/* Header - 只有非侧边栏模式才显示 */}
       {!isSidebar && (
         <div className="bg-white border-b border-slate-200 sticky top-0 z-50 px-6 py-4 flex items-center justify-between shadow-sm">
@@ -272,7 +272,7 @@ const AdminAuditView: React.FC<AdminAuditViewProps> = ({
 
       {/* 侧边栏模式下的精简筛选器 */}
       {isSidebar && (
-        <div className="p-4 border-b border-slate-100 flex items-center justify-between bg-slate-50">
+        <div className="p-4 border-b border-slate-100 flex items-center justify-between bg-slate-50 shrink-0">
            <div className="flex gap-2">
              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">筛选器</span>
              {result.isDualMode && (
@@ -293,8 +293,10 @@ const AdminAuditView: React.FC<AdminAuditViewProps> = ({
         </div>
       )}
 
-      <div className={`${isSidebar ? 'px-3 py-4' : 'max-w-6xl mx-auto px-6 py-8'}`}>
-        <div className="space-y-6">
+      {/* 滚动内容区域 */}
+      <div ref={scrollContainerRef} className={`flex-1 overflow-y-auto custom-scrollbar ${isSidebar ? 'pb-32' : 'pb-20'}`}>
+        <div className={`${isSidebar ? 'px-3 py-4' : 'max-w-6xl mx-auto px-6 py-8'}`}>
+          <div className="space-y-6">
           {filteredChecks.length === 0 ? (
             <div className="bg-white rounded-2xl border-2 border-dashed border-slate-200 p-20 text-center">
               <Layout size={48} className="mx-auto text-slate-200 mb-4" />
@@ -487,75 +489,76 @@ const AdminAuditView: React.FC<AdminAuditViewProps> = ({
               );
             })
           )}
+          </div>
         </div>
+
+        {/* --- 重点：底部“切割锚点”核对专区 --- */}
+        {result.splitAnchors && (
+          <div id="split-anchors-focus" className={`mt-10 space-y-6 border-t-2 border-dashed border-slate-200 pt-10 ${isSidebar ? 'px-4' : 'max-w-6xl mx-auto px-6'}`}>
+            <div className="flex items-center gap-3">
+              <div className="bg-indigo-600 p-2 rounded-xl text-white shadow-lg">
+                <Split size={20} />
+              </div>
+              <div>
+                <h2 className="text-lg font-black text-slate-900">双轮切割定位核对 (精准坐标)</h2>
+                <p className="text-[10px] text-slate-500">全文总长度: {result.fullRawText?.length || 0} 字</p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+              <AnchorCard 
+                title="1. 第一轮开始 (Start of R1)" 
+                phrase={result.splitAnchors.r1StartPhrase} 
+                pos={result.splitAnchors.r1StartPos}
+                desc="特征：第一轮互动扣1-5（开始）"
+                isSidebar={isSidebar}
+                onClick={() => handleAnchorClick(result.splitAnchors!.r1StartPhrase, result.splitAnchors!.r1StartPos)}
+              />
+              <AnchorCard 
+                title="2. 第一轮结束 (End of R1)" 
+                phrase={result.splitAnchors.r1EndPhrase} 
+                pos={result.splitAnchors.r1EndPos}
+                desc="特征：第一轮上链介绍结束（结束）"
+                isSidebar={isSidebar}
+                onClick={() => handleAnchorClick(result.splitAnchors!.r1EndPhrase, result.splitAnchors!.r1EndPos)}
+              />
+              <AnchorCard 
+                title="3. 第二轮开始 (Start of R2)" 
+                phrase={result.splitAnchors.r2StartPhrase} 
+                pos={result.splitAnchors.r2StartPos}
+                desc="特征：第二轮互动扣1-5（开始）"
+                isCore={true}
+                isSidebar={isSidebar}
+                onClick={() => handleAnchorClick(result.splitAnchors!.r2StartPhrase, result.splitAnchors!.r2StartPos)}
+              />
+              <AnchorCard 
+                title="4. 第二轮结束 (End of R2)" 
+                phrase={result.splitAnchors.r2EndPhrase} 
+                pos={result.splitAnchors.r2EndPos}
+                desc="特征：第二轮上链介绍结束（结束）"
+                isSidebar={isSidebar}
+                onClick={() => handleAnchorClick(result.splitAnchors!.r2EndPhrase, result.splitAnchors!.r2EndPos)}
+              />
+            </div>
+
+            <div className="mt-10 space-y-4">
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-black text-slate-900 flex items-center gap-2">
+                  <FileText size={18} className="text-slate-400" />
+                  直播全文源码 (核实锚点精准度)
+                </h3>
+                <p className="text-[10px] font-bold text-slate-400">点击上方卡片可自动跳转至对应原文位置</p>
+              </div>
+              
+              <FullTextWithHighlight 
+                text={result.fullRawText} 
+                highlightRange={activeHighlight} 
+                highlightId={activeHighlight?.id}
+              />
+            </div>
+          </div>
+        )}
       </div>
-
-      {/* --- 重点：底部“切割锚点”核对专区 --- */}
-      {result.splitAnchors && (
-        <div id="split-anchors-focus" className={`mt-10 space-y-6 border-t-2 border-dashed border-slate-200 pt-10 ${isSidebar ? 'px-4' : 'max-w-6xl mx-auto px-6'}`}>
-          <div className="flex items-center gap-3">
-            <div className="bg-indigo-600 p-2 rounded-xl text-white shadow-lg">
-              <Split size={20} />
-            </div>
-            <div>
-              <h2 className="text-lg font-black text-slate-900">双轮切割定位核对 (精准坐标)</h2>
-              <p className="text-[10px] text-slate-500">全文总长度: {result.fullRawText?.length || 0} 字</p>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-            <AnchorCard 
-              title="1. 第一轮开始 (Start of R1)" 
-              phrase={result.splitAnchors.r1StartPhrase} 
-              pos={result.splitAnchors.r1StartPos}
-              desc="特征：第一轮互动扣1-5（开始）"
-              isSidebar={isSidebar}
-              onClick={() => handleAnchorClick(result.splitAnchors!.r1StartPhrase, result.splitAnchors!.r1StartPos)}
-            />
-            <AnchorCard 
-              title="2. 第一轮结束 (End of R1)" 
-              phrase={result.splitAnchors.r1EndPhrase} 
-              pos={result.splitAnchors.r1EndPos}
-              desc="特征：第一轮上链介绍结束（结束）"
-              isSidebar={isSidebar}
-              onClick={() => handleAnchorClick(result.splitAnchors!.r1EndPhrase, result.splitAnchors!.r1EndPos)}
-            />
-            <AnchorCard 
-              title="3. 第二轮开始 (Start of R2)" 
-              phrase={result.splitAnchors.r2StartPhrase} 
-              pos={result.splitAnchors.r2StartPos}
-              desc="特征：第二轮互动扣1-5（开始）"
-              isCore={true}
-              isSidebar={isSidebar}
-              onClick={() => handleAnchorClick(result.splitAnchors!.r2StartPhrase, result.splitAnchors!.r2StartPos)}
-            />
-            <AnchorCard 
-              title="4. 第二轮结束 (End of R2)" 
-              phrase={result.splitAnchors.r2EndPhrase} 
-              pos={result.splitAnchors.r2EndPos}
-              desc="特征：第二轮上链介绍结束（结束）"
-              isSidebar={isSidebar}
-              onClick={() => handleAnchorClick(result.splitAnchors!.r2EndPhrase, result.splitAnchors!.r2EndPos)}
-            />
-          </div>
-
-          <div className="mt-10 space-y-4">
-            <div className="flex items-center justify-between">
-              <h3 className="text-sm font-black text-slate-900 flex items-center gap-2">
-                <FileText size={18} className="text-slate-400" />
-                直播全文源码 (核实锚点精准度)
-              </h3>
-              <p className="text-[10px] font-bold text-slate-400">点击上方卡片可自动跳转至对应原文位置</p>
-            </div>
-            
-            <FullTextWithHighlight 
-              text={result.fullRawText} 
-              highlightRange={activeHighlight} 
-              highlightId={activeHighlight?.id}
-            />
-          </div>
-        </div>
-      )}
     </div>
   );
 };
