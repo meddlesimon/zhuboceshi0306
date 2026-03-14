@@ -287,11 +287,11 @@ const App: React.FC = () => {
   const totalCount = standards.length;
 
   return (
-    <div className="min-h-screen bg-slate-100 font-sans text-slate-900 flex justify-center print:bg-white print:h-auto overflow-x-hidden">
-      <div className={`w-full bg-white min-h-screen shadow-2xl flex flex-col relative print:max-w-none print:shadow-none print:min-h-0 transition-all duration-500 ease-in-out ${step === AppStep.REPORT ? 'max-w-none' : 'max-w-[600px]'}`}>
+    <div className={`min-h-screen bg-slate-100 font-sans text-slate-900 print:bg-white print:h-auto overflow-x-hidden ${(step === AppStep.REPORT || step === AppStep.VERIFY_ANCHORS) ? '' : 'flex justify-center'}`}>
+      <div className={`w-full bg-white min-h-screen shadow-2xl flex flex-col relative print:max-w-none print:shadow-none print:min-h-0 transition-all duration-500 ease-in-out ${(step === AppStep.REPORT || step === AppStep.VERIFY_ANCHORS) ? 'max-w-none' : 'max-w-[600px]'}`}>
         <Header actionSlot={step === AppStep.REPORT ? headerActions : undefined} />
 
-        <main className="flex-1 overflow-y-auto print:overflow-visible">
+        <main className={`flex-1 flex flex-col print:overflow-visible ${step === AppStep.VERIFY_ANCHORS ? 'overflow-hidden' : 'overflow-y-auto'}`}>
           {step === AppStep.LOGIN && (
             <LoginView onLogin={handleAdminLogin} loading={isLoginLoading} />
           )}
@@ -310,7 +310,7 @@ const App: React.FC = () => {
             </div>
           )}
 
-          <div className="p-6 print:p-0">
+          <div className={step === AppStep.VERIFY_ANCHORS ? 'flex-1 flex flex-col overflow-hidden print:p-0' : 'p-6 print:p-0'}>
             {step === AppStep.LOGIN && error && (
               <div className="bg-red-50 text-red-600 p-3 rounded-lg text-xs flex items-start gap-2 mb-4 animate-in slide-in-from-top-2">
                 <AlertTriangle size={14} className="shrink-0 mt-0.5" />

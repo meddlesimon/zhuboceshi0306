@@ -295,14 +295,14 @@ const WorkspaceView: React.FC<Props> = ({ anchor, onBack }) => {
   // 核对锚点模式（复用原有组件）
   if (panelMode === 'verify-anchors' && candidateAnchors) {
     return (
-      <div className="min-h-screen bg-slate-50">
-        <div className="bg-white border-b border-slate-100 px-6 py-4 flex items-center gap-3 shadow-sm">
+      <div className="h-screen flex flex-col bg-slate-50 overflow-hidden">
+        <div className="bg-white border-b border-slate-100 px-6 py-4 flex items-center gap-3 shadow-sm shrink-0">
           <button onClick={() => setPanelMode('new-check')} className="w-9 h-9 flex items-center justify-center rounded-xl hover:bg-slate-100 transition-colors">
             <ArrowLeft size={18} className="text-slate-600" />
           </button>
           <span className="text-base font-black text-slate-900">核对锚点 — {anchor.name}</span>
         </div>
-        <div className="p-6 max-w-[600px] mx-auto">
+        <div className="flex-1 flex flex-col overflow-hidden">
           <AnchorVerification
             fullText={transcript}
             initialAnchors={candidateAnchors}

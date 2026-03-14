@@ -292,7 +292,20 @@ app.post('/api/check-single-window', async (req, res) => {
 
   } catch (error) {
     console.error('<<< [API/check-single-window] Error:', error.message);
-    res.status(500).json({ error: error.message });
+    // 降级兜底：如果第一阶段（物理证据提取）已完成，打分解析失败时返回降级结果而非 500
+    if (typeof topicScene !== 'undefined' && topicScene) {
+      console.warn('<<< [API/check-single-window] Falling back to degraded result with evidence.');
+      res.json({
+        detected: false,
+        performance_grade: 'fair',
+        score: 0,
+        reason_or_comment: 'AI 评分解析失败，请人工复核',
+        topic_scene: topicScene,
+        core_evidence: typeof coreEvidence !== 'undefined' ? coreEvidence : topicScene
+      });
+    } else {
+      res.status(500).json({ error: error.message });
+    }
   }
 });
 
