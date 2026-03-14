@@ -84,23 +84,13 @@ export const findCandidateAnchors = async (fullText: string): Promise<any> => {
   const totalLen = fullText.length;
   if (totalLen < 500) throw new Error("文本长度不足，无法进行双轮拆分（至少需要500字以上）");
 
-  // 1. 按照固定百分比区间生成视窗
-  const getWin = (startP: number, endP: number) => 
-    fullText.substring(Math.floor(totalLen * startP), Math.floor(totalLen * endP));
+  console.log("[FindAnchors] Sending full-text 2-phrase scan request...");
 
-  const windows = [
-    getWin(0, 0.15),   // R1 Start: 0-15%
-    getWin(0.35, 0.60), // R1 End: 35-60%
-    getWin(0.50, 0.65), // R2 Start: 50-65%
-    getWin(0.70, 1.0)   // R2 End: 70-100%
-  ];
-
-  console.log("[FindAnchors] Sending 4-window pre-scan request...");
-
+  // 1. 发全文给后端，AI 只需返回最典型的开始短语和结束短语各一条
   const response = await fetch('/api/find-candidate-anchors', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ windows })
+    body: JSON.stringify({ fullText })
   });
 
   if (!response.ok) {
@@ -110,27 +100,40 @@ export const findCandidateAnchors = async (fullText: string): Promise<any> => {
 
   const result = await response.json();
 
-  // 2. 将相对视窗的偏移转换为全局偏移
-  const globalPos = (phrase: string | null, winIdx: number) => {
-    if (!phrase) return -1;
-    const winStartPercent = [0, 0.35, 0.50, 0.70][winIdx];
-    const winStartOffset = Math.floor(totalLen * winStartPercent);
-    const winText = windows[winIdx];
-    const localIdx = fuzzyIndexOf(winText, phrase);
-    if (localIdx === -1) return -1;
-    return winStartOffset + localIdx;
+  // 2. 按出现次序找第 N 次出现的全局位置（精确优先，失败则模糊匹配）
+  const findNthOccurrence = (text: string, phrase: string | null, n: number): number => {
+    if (!phrase || phrase.length < 4) return -1;
+    let pos = -1;
+    let searchFrom = 0;
+    for (let i = 0; i < n; i++) {
+      // 先精确查找
+      let idx = text.indexOf(phrase, searchFrom);
+      if (idx === -1) {
+        // 精确找不到则模糊查找（从上次位置开始）
+        const subText = text.slice(searchFrom);
+        const fuzzyIdx = fuzzyIndexOf(subText, phrase);
+        idx = fuzzyIdx !== -1 ? searchFrom + fuzzyIdx : -1;
+      }
+      if (idx === -1) return -1;
+      pos = idx;
+      searchFrom = idx + 1;
+    }
+    return pos;
   };
 
+  const startPhrase = result.start_phrase as string | null;
+  const endPhrase   = result.end_phrase as string | null;
+
   return {
-    r1StartPhrase: result.r1_start,
-    r1StartPos: globalPos(result.r1_start, 0),
-    r1EndPhrase: result.r1_end,
-    r1EndPos: globalPos(result.r1_end, 1),
-    r2StartPhrase: result.r2_start,
-    r2StartPos: globalPos(result.r2_start, 2),
-    r2EndPhrase: result.r2_end,
-    r2EndPos: globalPos(result.r2_end, 3),
-    found: !!(result.r1_start && result.r1_end && result.r2_start && result.r2_end)
+    r1StartPhrase: startPhrase,
+    r1StartPos:    findNthOccurrence(fullText, startPhrase, 1),  // 开始词第1次出现 → 第一轮开始
+    r1EndPhrase:   endPhrase,
+    r1EndPos:      findNthOccurrence(fullText, endPhrase, 1),    // 结束词第1次出现 → 第一轮结束
+    r2StartPhrase: startPhrase,
+    r2StartPos:    findNthOccurrence(fullText, startPhrase, 2),  // 开始词第2次出现 → 第二轮开始
+    r2EndPhrase:   endPhrase,
+    r2EndPos:      findNthOccurrence(fullText, endPhrase, 2),    // 结束词第2次出现 → 第二轮结束
+    found: !!(startPhrase && endPhrase)
   };
 };
 

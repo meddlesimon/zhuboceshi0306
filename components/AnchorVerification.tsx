@@ -102,16 +102,28 @@ const AnchorVerification: React.FC<AnchorVerificationProps> = ({ fullText, initi
     const selectedText = sel.toString().trim();
     if (selectedText.length < 5) return; // 太短不给选
 
-    // 在全文中精确定位选中的文字
-    // 注意：这里的定位可能不唯一，如果文档中有多处相同文字，会选第一处
-    // 在实际生产中，我们可以结合 Selection 的 offset 来计算精确全局位置
-    const pos = fullText.indexOf(selectedText); 
-    
-    setSelection({
-      text: selectedText,
-      start: pos,
-      end: pos + selectedText.length
-    });
+    // ✅ 修复：通过 DOM Range 计算用户实际选中位置在全文中的真实全局偏移
+    // 避免 indexOf() 永远返回第一次出现位置的 Bug
+    const range = sel.getRangeAt(0);
+    const container = textContainerRef.current;
+    if (!container) return;
+
+    try {
+      const preRange = document.createRange();
+      preRange.setStart(container, 0);
+      preRange.setEnd(range.startContainer, range.startOffset);
+      const pos = preRange.toString().length;
+
+      setSelection({
+        text: selectedText,
+        start: pos,
+        end: pos + selectedText.length
+      });
+    } catch {
+      // 兜底：如果 DOM Range 计算失败，退回 indexOf
+      const pos = fullText.indexOf(selectedText);
+      setSelection({ text: selectedText, start: pos, end: pos + selectedText.length });
+    }
   };
 
   const setAsAnchor = (anchorId: string) => {

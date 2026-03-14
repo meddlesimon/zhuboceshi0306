@@ -141,7 +141,8 @@ const WorkspaceView: React.FC<Props> = ({ anchor, onBack }) => {
           anchor_id: anchor.id,
           transcript_text: transcript,
           transcript_filename: transcriptFileName || '未命名文件',
-          is_dual_mode: isDualRound
+          is_dual_mode: isDualRound,
+          manual_anchors: manualAnchors
         })
       });
       const data = await res.json();
@@ -163,7 +164,7 @@ const WorkspaceView: React.FC<Props> = ({ anchor, onBack }) => {
         score_r2: null,
         is_dual_mode: isDualRound ? 1 : 0,
         progress_message: '任务已提交...',
-        created_at: new Date().toLocaleString('zh-CN'),
+        created_at: new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }),
         completed_at: null,
         error_message: null
       };

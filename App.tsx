@@ -10,6 +10,7 @@ import AnchorSelector from './components/AnchorSelector';
 import WorkspaceView from './components/WorkspaceView';
 import AnchorAdminPage from './components/AnchorAdminPage';
 import ScriptAdminPage from './components/ScriptAdminPage';
+import ModelAdminPage from './components/ModelAdminPage';
 import { parseStandardsCSV, parseTranscript, parseMetadataFromFilename } from './utils/csvHelper';
 import { analyzeScript, splitTranscript, findCandidateAnchors } from './services/doubaoService';
 import { 
@@ -32,7 +33,9 @@ const App: React.FC = () => {
   // ============================================================
   // 新增：顶层页面路由（不影响原有步骤逻辑）
   // ============================================================
-  const [appPage, setAppPage] = useState<AppPage>('login');
+  const [appPage, setAppPage] = useState<AppPage>(() =>
+    localStorage.getItem('qc_logged_in') === '1' ? 'home' : 'login'
+  );
   const [selectedAnchor, setSelectedAnchor] = useState<Anchor | null>(null);
 
   // ============================================================
@@ -76,7 +79,7 @@ const App: React.FC = () => {
       });
       const data = await response.json();
       if (data.success) {
-        // 登录成功后跳转到主播选择页（新增）
+        localStorage.setItem('qc_logged_in', '1');
         setAppPage('home');
       } else {
         setError(data.error || "账号或密码错误");
@@ -253,6 +256,7 @@ const App: React.FC = () => {
         onSelectAnchor={(anchor) => { setSelectedAnchor(anchor); setAppPage('workspace'); }}
         onGoAnchorAdmin={() => setAppPage('anchor-admin')}
         onGoScriptAdmin={() => setAppPage('script-admin')}
+        onGoModelAdmin={() => setAppPage('model-admin')}
       />
     );
   }
@@ -272,6 +276,10 @@ const App: React.FC = () => {
 
   if (appPage === 'script-admin') {
     return <ScriptAdminPage onBack={() => setAppPage('home')} />;
+  }
+
+  if (appPage === 'model-admin') {
+    return <ModelAdminPage onBack={() => setAppPage('home')} />;
   }
 
   // Helper to count Importance

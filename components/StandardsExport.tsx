@@ -84,7 +84,7 @@ const StandardsExport: React.FC<StandardsExportProps> = ({ standards, fileName }
 
       // 4. MEASURE
       const contentHeight = clone.scrollHeight;
-      const dateStr = new Date().toLocaleDateString().replace(/\//g, '-');
+      const dateStr = new Date().toLocaleDateString('zh-CN', { timeZone: 'Asia/Shanghai' }).replace(/\//g, '-');
 
       // 5. CONFIG
       const opt = {
@@ -156,7 +156,7 @@ const StandardsExport: React.FC<StandardsExportProps> = ({ standards, fileName }
             <h2 className="text-2xl font-black text-slate-900 tracking-tight leading-none mb-2">今日直播上播前确认单</h2>
             <div className="flex justify-between items-end">
               <span className="text-xs font-bold text-slate-400 uppercase tracking-widest">PRE-STREAM CHECKLIST</span>
-              <span className="text-xs font-mono font-bold bg-slate-100 px-2 py-1 rounded text-slate-600">{new Date().toLocaleDateString()}</span>
+              <span className="text-xs font-mono font-bold bg-slate-100 px-2 py-1 rounded text-slate-600">{new Date().toLocaleDateString('zh-CN', { timeZone: 'Asia/Shanghai' })}</span>
             </div>
           </div>
 

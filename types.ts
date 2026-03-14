@@ -132,4 +132,22 @@ export interface Task {
   result?: MultiRoundResult; // 仅在详情查询时返回
 }
 
-export type AppPage = 'login' | 'home' | 'workspace' | 'anchor-admin' | 'script-admin';
+export type AppPage = 'login' | 'home' | 'workspace' | 'anchor-admin' | 'script-admin' | 'model-admin';
+
+// ============================================================
+// 模型配置相关类型
+// ============================================================
+
+export interface ModelPreset {
+  id: string;
+  name: string;
+  model_name: string;
+  api_url: string;
+  api_key_masked: string; // 脱敏后的 key，用于展示
+  is_builtin: boolean;
+}
+
+export interface ModelConfig {
+  active_model_id: string;
+  presets: ModelPreset[];
+}

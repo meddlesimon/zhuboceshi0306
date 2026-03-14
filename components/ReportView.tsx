@@ -526,7 +526,7 @@ const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, on
         <div class="flex justify-between items-end text-xs text-slate-500">
           <div>
             <p>主播：<span class="font-bold text-slate-900">${metadata.anchorName || '-'}</span></p>
-            <p>日期：${metadata.date || new Date().toLocaleDateString()}</p>
+            <p>日期：${metadata.date || new Date().toLocaleDateString('zh-CN', { timeZone: 'Asia/Shanghai' })}</p>
           </div>
           <div class="flex flex-col items-end gap-1">
             <span class="bg-blue-50 text-blue-600 px-2 py-1 rounded font-bold">已确认 ${approvedCount} 项</span>
@@ -1614,7 +1614,7 @@ const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, on
           </div>
           
           <div className="mt-12 pt-6 border-t border-slate-100 text-center text-slate-400 text-xs font-mono">
-            StreamScript QA 智能质检 • {new Date().toLocaleDateString()}
+            StreamScript QA 智能质检 • {new Date().toLocaleDateString('zh-CN', { timeZone: 'Asia/Shanghai' })}
           </div>
         </div>
 

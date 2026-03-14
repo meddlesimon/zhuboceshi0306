@@ -1,14 +1,15 @@
 import React, { useEffect, useState } from 'react';
 import { Anchor } from '../types';
-import { Users, Plus, Settings, BookOpen, Loader2, AlertTriangle, Mic } from 'lucide-react';
+import { Users, Plus, Settings, BookOpen, Loader2, AlertTriangle, Mic, Cpu } from 'lucide-react';
 
 interface Props {
   onSelectAnchor: (anchor: Anchor) => void;
   onGoAnchorAdmin: () => void;
   onGoScriptAdmin: () => void;
+  onGoModelAdmin: () => void;
 }
 
-const AnchorSelector: React.FC<Props> = ({ onSelectAnchor, onGoAnchorAdmin, onGoScriptAdmin }) => {
+const AnchorSelector: React.FC<Props> = ({ onSelectAnchor, onGoAnchorAdmin, onGoScriptAdmin, onGoModelAdmin }) => {
   const [anchors, setAnchors] = useState<Anchor[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -81,6 +82,13 @@ const AnchorSelector: React.FC<Props> = ({ onSelectAnchor, onGoAnchorAdmin, onGo
           >
             <Settings size={14} />
             主播管理
+          </button>
+          <button
+            onClick={onGoModelAdmin}
+            className="flex items-center gap-1.5 px-3 py-2 text-xs font-bold text-white bg-purple-600 hover:bg-purple-700 rounded-xl transition-all"
+          >
+            <Cpu size={14} />
+            模型配置
           </button>
         </div>
       </div>

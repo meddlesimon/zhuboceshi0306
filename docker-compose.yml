@@ -4,21 +4,21 @@ services:
   anchor-analyzer-v27:
     build: .
     ports:
-      - "8081:3000"
+      - "8081:3001"
     environment:
       - GEMINI_API_KEY=sk-3TO0OtML740DE4C47351T3BLBKFJc576476F8D79476ba371
       - GEMINI_MODEL=gemini-3.1-flash-lite-preview
       - GEMINI_URL=https://cn2us02.opapi.win/v1/chat/completions
-      - PORT=3000
+      - PORT=3001
       - NODE_ENV=production
       - DATA_DIR=/app/data
     volumes:
-      - zhuboceshi_data:/app/data
+      - anchor-analyzer_zhuboceshi_data:/app/data
     dns:
       - 114.114.114.114
       - 8.8.8.8
     restart: always
 
 volumes:
-  zhuboceshi_data:
-    driver: local
+  anchor-analyzer_zhuboceshi_data:
+    external: true
