@@ -1,15 +1,16 @@
 import React, { useEffect, useState } from 'react';
 import { Anchor } from '../types';
-import { Users, Plus, Settings, BookOpen, Loader2, AlertTriangle, Mic, Cpu } from 'lucide-react';
+import { Users, Plus, Settings, BookOpen, Loader2, AlertTriangle, Mic, Cpu, GraduationCap } from 'lucide-react';
 
 interface Props {
   onSelectAnchor: (anchor: Anchor) => void;
   onGoAnchorAdmin: () => void;
   onGoScriptAdmin: () => void;
   onGoModelAdmin: () => void;
+  onGoTrainingAdmin: () => void;
 }
 
-const AnchorSelector: React.FC<Props> = ({ onSelectAnchor, onGoAnchorAdmin, onGoScriptAdmin, onGoModelAdmin }) => {
+const AnchorSelector: React.FC<Props> = ({ onSelectAnchor, onGoAnchorAdmin, onGoScriptAdmin, onGoModelAdmin, onGoTrainingAdmin }) => {
   const [anchors, setAnchors] = useState<Anchor[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -69,6 +70,13 @@ const AnchorSelector: React.FC<Props> = ({ onSelectAnchor, onGoAnchorAdmin, onGo
           </div>
         </div>
         <div className="flex gap-2">
+          <button
+            onClick={onGoTrainingAdmin}
+            className="flex items-center gap-1.5 px-3 py-2 text-xs font-bold text-white bg-emerald-500 hover:bg-emerald-600 rounded-xl transition-all"
+          >
+            <GraduationCap size={14} />
+            主播培训
+          </button>
           <button
             onClick={onGoScriptAdmin}
             className="flex items-center gap-1.5 px-3 py-2 text-xs font-bold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-xl transition-all"

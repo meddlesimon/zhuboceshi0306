@@ -11,6 +11,8 @@ import WorkspaceView from './components/WorkspaceView';
 import AnchorAdminPage from './components/AnchorAdminPage';
 import ScriptAdminPage from './components/ScriptAdminPage';
 import ModelAdminPage from './components/ModelAdminPage';
+import TrainingAdminPage from './components/TrainingAdminPage';
+import TrainingFlashcard from './components/TrainingFlashcard';
 import { parseStandardsCSV, parseTranscript, parseMetadataFromFilename } from './utils/csvHelper';
 import { analyzeScript, splitTranscript, findCandidateAnchors } from './services/doubaoService';
 import { 
@@ -30,6 +32,13 @@ import {
 } from 'lucide-react';
 
 const App: React.FC = () => {
+  // ============================================================
+  // 主播培训前台入口：/zhubopeixun 路径直接渲染闪卡页面
+  // ============================================================
+  if (typeof window !== 'undefined' && window.location.pathname === '/zhubopeixun') {
+    return <TrainingFlashcard />;
+  }
+
   // ============================================================
   // 新增：顶层页面路由（不影响原有步骤逻辑）
   // ============================================================
@@ -257,6 +266,7 @@ const App: React.FC = () => {
         onGoAnchorAdmin={() => setAppPage('anchor-admin')}
         onGoScriptAdmin={() => setAppPage('script-admin')}
         onGoModelAdmin={() => setAppPage('model-admin')}
+        onGoTrainingAdmin={() => setAppPage('training-admin')}
       />
     );
   }
@@ -280,6 +290,10 @@ const App: React.FC = () => {
 
   if (appPage === 'model-admin') {
     return <ModelAdminPage onBack={() => setAppPage('home')} />;
+  }
+
+  if (appPage === 'training-admin') {
+    return <TrainingAdminPage onBack={() => setAppPage('home')} />;
   }
 
   // Helper to count Importance

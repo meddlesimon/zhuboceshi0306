@@ -132,7 +132,36 @@ export interface Task {
   result?: MultiRoundResult; // 仅在详情查询时返回
 }
 
-export type AppPage = 'login' | 'home' | 'workspace' | 'anchor-admin' | 'script-admin' | 'model-admin';
+export type AppPage = 'login' | 'home' | 'workspace' | 'anchor-admin' | 'script-admin' | 'model-admin' | 'training-admin';
+
+// ============================================================
+// 主播培训模块相关类型
+// ============================================================
+
+export interface TrainingCourse {
+  id: number;
+  title: string;
+  standards_version_id: number;
+  standards_version_label: string;
+  created_at: string;
+}
+
+export interface TrainingSlide {
+  id: number;
+  course_id: number;
+  order: number;
+  title: string;
+  image_base64: string;
+  standard_start: number; // 话术序号起始（1-based）
+  standard_end: number;   // 话术序号结束（inclusive）
+}
+
+export interface TrainingAccount {
+  id: number;
+  username: string;
+  password: string;
+  display_name: string;
+}
 
 // ============================================================
 // 模型配置相关类型

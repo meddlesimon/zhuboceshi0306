@@ -1172,9 +1172,250 @@ app.get('/api/anchors/:id/tasks', (req, res) => {
 });
 
 // ============================================================
+// API：主播培训模块（全部追加，不动现有接口）
+// ============================================================
+
+// --- 主播登录（独立账号体系）---
+app.post('/api/training/login', (req, res) => {
+  const { username, password } = req.body;
+  if (!username || !password) return res.status(400).json({ error: '账号和密码不能为空' });
+  try {
+    const db = loadDB();
+    const accounts = db.training_accounts || [];
+    const account = accounts.find(a => a.username === username && a.password === password);
+    if (!account) return res.status(401).json({ error: '账号或密码错误' });
+    res.json({ success: true, display_name: account.display_name, username: account.username });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// --- 课程管理 ---
+app.get('/api/training/courses', (req, res) => {
+  try {
+    const db = loadDB();
+    res.json((db.training_courses || []).sort((a, b) => b.id - a.id));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/training/courses', (req, res) => {
+  const { title, standards_version_id } = req.body;
+  if (!title || !title.trim()) return res.status(400).json({ error: '课程名不能为空' });
+  if (!standards_version_id) return res.status(400).json({ error: '请选择话术版本' });
+  try {
+    const db = loadDB();
+    if (!db.training_courses) db.training_courses = [];
+    if (!db._next_training_course_id) db._next_training_course_id = 1;
+    const ver = db.standards_versions.find(v => v.id === parseInt(standards_version_id));
+    const course = {
+      id: db._next_training_course_id++,
+      title: title.trim(),
+      standards_version_id: parseInt(standards_version_id),
+      standards_version_label: ver ? ver.version_label : '未知版本',
+      created_at: new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })
+    };
+    db.training_courses.push(course);
+    saveDB(db);
+    res.json(course);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete('/api/training/courses/:id', (req, res) => {
+  const id = parseInt(req.params.id);
+  try {
+    const db = loadDB();
+    if (!db.training_courses) return res.status(404).json({ error: '课程不存在' });
+    db.training_courses = db.training_courses.filter(c => c.id !== id);
+    if (db.training_slides) db.training_slides = db.training_slides.filter(s => s.course_id !== id);
+    saveDB(db);
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// --- 幻灯片管理 ---
+app.get('/api/training/courses/:id/slides', (req, res) => {
+  const courseId = parseInt(req.params.id);
+  try {
+    const db = loadDB();
+    const slides = (db.training_slides || [])
+      .filter(s => s.course_id === courseId)
+      .sort((a, b) => a.order - b.order);
+    res.json(slides);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/training/slides', (req, res) => {
+  const { course_id, order, title, image_base64, standard_start, standard_end } = req.body;
+  if (!course_id) return res.status(400).json({ error: 'course_id 不能为空' });
+  try {
+    const db = loadDB();
+    if (!db.training_slides) db.training_slides = [];
+    if (!db._next_training_slide_id) db._next_training_slide_id = 1;
+    const slide = {
+      id: db._next_training_slide_id++,
+      course_id: parseInt(course_id),
+      order: order || 1,
+      title: title || '',
+      image_base64: image_base64 || '',
+      standard_start: parseInt(standard_start) || 1,
+      standard_end: parseInt(standard_end) || 1
+    };
+    db.training_slides.push(slide);
+    saveDB(db);
+    res.json(slide);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.put('/api/training/slides/:id', (req, res) => {
+  const id = parseInt(req.params.id);
+  try {
+    const db = loadDB();
+    if (!db.training_slides) return res.status(404).json({ error: '幻灯片不存在' });
+    const idx = db.training_slides.findIndex(s => s.id === id);
+    if (idx === -1) return res.status(404).json({ error: '幻灯片不存在' });
+    const { title, standard_start, standard_end, order, image_base64 } = req.body;
+    if (title !== undefined) db.training_slides[idx].title = title;
+    if (standard_start !== undefined) db.training_slides[idx].standard_start = parseInt(standard_start);
+    if (standard_end !== undefined) db.training_slides[idx].standard_end = parseInt(standard_end);
+    if (order !== undefined) db.training_slides[idx].order = order;
+    if (image_base64 !== undefined) db.training_slides[idx].image_base64 = image_base64;
+    saveDB(db);
+    res.json(db.training_slides[idx]);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete('/api/training/slides/:id', (req, res) => {
+  const id = parseInt(req.params.id);
+  try {
+    const db = loadDB();
+    if (!db.training_slides) return res.status(404).json({ error: '幻灯片不存在' });
+    db.training_slides = db.training_slides.filter(s => s.id !== id);
+    saveDB(db);
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 批量保存某课程的幻灯片顺序
+app.put('/api/training/courses/:id/slides/reorder', (req, res) => {
+  const courseId = parseInt(req.params.id);
+  const { slide_ids } = req.body; // 按新顺序排列的 id 数组
+  if (!Array.isArray(slide_ids)) return res.status(400).json({ error: 'slide_ids 必须是数组' });
+  try {
+    const db = loadDB();
+    if (!db.training_slides) return res.json({ success: true });
+    slide_ids.forEach((sid, idx) => {
+      const s = db.training_slides.find(s => s.id === sid && s.course_id === courseId);
+      if (s) s.order = idx + 1;
+    });
+    saveDB(db);
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 获取某课程幻灯片的【元数据列表】（不含 image_base64，加速首屏加载）
+app.get('/api/training/courses/:id/slides/meta', (req, res) => {
+  const courseId = parseInt(req.params.id);
+  try {
+    const db = loadDB();
+    const slides = (db.training_slides || [])
+      .filter(s => s.course_id === courseId)
+      .sort((a, b) => a.order - b.order)
+      .map(({ image_base64, ...rest }) => rest); // 去掉图片字段
+    res.json(slides);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 获取单张幻灯片的图片（懒加载专用）
+app.get('/api/training/slides/:id/image', (req, res) => {
+  const id = parseInt(req.params.id);
+  try {
+    const db = loadDB();
+    const slide = (db.training_slides || []).find(s => s.id === id);
+    if (!slide) return res.status(404).json({ error: '幻灯片不存在' });
+    res.json({ id: slide.id, image_base64: slide.image_base64 || '' });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// --- 账号管理 ---
+app.get('/api/training/accounts', (req, res) => {
+  try {
+    const db = loadDB();
+    const accounts = (db.training_accounts || []).map(a => ({
+      id: a.id, username: a.username, display_name: a.display_name
+      // 不返回 password
+    }));
+    res.json(accounts);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/training/accounts', (req, res) => {
+  const { username, password, display_name } = req.body;
+  if (!username || !password || !display_name) return res.status(400).json({ error: '账号、密码、显示名均不能为空' });
+  try {
+    const db = loadDB();
+    if (!db.training_accounts) db.training_accounts = [];
+    if (!db._next_training_account_id) db._next_training_account_id = 1;
+    if (db.training_accounts.find(a => a.username === username.trim())) {
+      return res.status(409).json({ error: '该账号已存在' });
+    }
+    const account = {
+      id: db._next_training_account_id++,
+      username: username.trim(),
+      password: password,
+      display_name: display_name.trim()
+    };
+    db.training_accounts.push(account);
+    saveDB(db);
+    res.json({ id: account.id, username: account.username, display_name: account.display_name });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete('/api/training/accounts/:id', (req, res) => {
+  const id = parseInt(req.params.id);
+  try {
+    const db = loadDB();
+    if (!db.training_accounts) return res.status(404).json({ error: '账号不存在' });
+    db.training_accounts = db.training_accounts.filter(a => a.id !== id);
+    saveDB(db);
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ============================================================
 // Serve static files from the React app
 // ============================================================
 app.use(express.static(path.join(__dirname, 'dist')));
+
+// 主播培训前台独立路由（需在 * 通配之前）
+app.get('/zhubopeixun', (req, res) => {
+  res.sendFile(path.join(__dirname, 'dist', 'index.html'));
+});
 
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'dist', 'index.html'));

@@ -22,3 +22,15 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# SSH 密钥 / 服务器证书（敏感，禁止上传）
+*.pem
+lighthouse.pem
+lighthouse_fixed.pem
+
+# 打包压缩文件
+*.tar.gz
+project.tar.gz
+
+# 本地数据目录
+data/
