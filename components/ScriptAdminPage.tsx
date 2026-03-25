@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Standard, StandardsVersion } from '../types';
 import { parseStandardsCSV } from '../utils/csvHelper';
-import { ArrowLeft, BookOpen, Upload, CheckCircle2, AlertTriangle, Loader2, ChevronRight, ExternalLink, ClipboardPaste } from 'lucide-react';
+import { ArrowLeft, BookOpen, Upload, CheckCircle2, AlertTriangle, Loader2, ChevronRight, ExternalLink, ClipboardPaste, Trash2 } from 'lucide-react';
 
 interface Props {
   onBack: () => void;
@@ -70,6 +70,15 @@ const ScriptAdminPage: React.FC<Props> = ({ onBack }) => {
   const handleParse = () => {
     if (!pasteContent.trim()) { setParseError('请先粘贴内容'); return; }
     try {
+      // 同时发送到后端调试接口用于分析
+      fetch('/api/debug-parse', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: pasteContent })
+      }).then(r => r.json()).then(data => {
+        console.log('[调试] CSV解析分析:', JSON.stringify(data, null, 2));
+      }).catch(() => {});
+      
       const result = parseStandardsCSV(pasteContent);
       if (result.length === 0) throw new Error('未能识别出有效话术，请检查格式（需包含"分类"、"质检重点"等列）');
       setParsedStandards(result);
@@ -101,6 +110,24 @@ const ScriptAdminPage: React.FC<Props> = ({ onBack }) => {
       setError(e.message);
     } finally {
       setUploading(false);
+    }
+  };
+
+  const handleDelete = async (verId: number, verLabel: string) => {
+    if (!window.confirm(`确定要删除版本 ${verLabel} 吗？此操作不可恢复。`)) return;
+    setError(null);
+    try {
+      const res = await fetch(`/api/standards/${verId}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || '删除失败');
+      showSuccess(`版本 ${verLabel} 已删除`);
+      if (selectedVersion?.id === verId) {
+        setSelectedVersion(null);
+        setSelectedContent([]);
+      }
+      loadVersions();
+    } catch (e: any) {
+      setError(e.message);
     }
   };
 
@@ -172,19 +199,29 @@ const ScriptAdminPage: React.FC<Props> = ({ onBack }) => {
           ) : (
             <div className="flex-1 overflow-y-auto">
               {versions.map(ver => (
-                <button
+                <div
                   key={ver.id}
+                  className={`w-full text-left px-4 py-4 border-b border-slate-50 hover:bg-slate-50 transition-colors cursor-pointer group ${selectedVersion?.id === ver.id ? 'bg-violet-50 border-l-2 border-l-violet-500' : ''}`}
                   onClick={() => loadVersionDetail(ver)}
-                  className={`w-full text-left px-4 py-4 border-b border-slate-50 hover:bg-slate-50 transition-colors ${selectedVersion?.id === ver.id ? 'bg-violet-50 border-l-2 border-l-violet-500' : ''}`}
                 >
                   <div className="flex items-center justify-between mb-1">
                     <span className="text-sm font-black text-slate-800">{ver.version_label}</span>
-                    {ver.is_current === 1 && (
-                      <span className="text-[10px] font-bold bg-violet-600 text-white px-2 py-0.5 rounded-full">当前</span>
-                    )}
+                    <div className="flex items-center gap-1.5">
+                      {ver.is_current === 1 ? (
+                        <span className="text-[10px] font-bold bg-violet-600 text-white px-2 py-0.5 rounded-full">当前</span>
+                      ) : (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handleDelete(ver.id, ver.version_label); }}
+                          className="opacity-0 group-hover:opacity-100 w-6 h-6 flex items-center justify-center rounded-lg hover:bg-red-100 text-slate-300 hover:text-red-500 transition-all"
+                          title="删除此版本"
+                        >
+                          <Trash2 size={12} />
+                        </button>
+                      )}
+                    </div>
                   </div>
                   <p className="text-xs text-slate-400">{ver.total_count} 条 · {ver.created_at?.slice(0, 10)}</p>
-                </button>
+                </div>
               ))}
             </div>
           )}

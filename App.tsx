@@ -141,12 +141,8 @@ const App: React.FC = () => {
     }
   };
 
+  // 单轮和双轮都走锚点扫描流程，用锚点框定有效质检区间
   const startScanningAnchors = async () => {
-    if (!isDualRound) {
-      startAnalysis(null);
-      return;
-    }
-
     setIsScanning(true);
     setError(null);
     try {
@@ -166,13 +162,11 @@ const App: React.FC = () => {
     setError(null);
     try {
       if (isDualRound) {
-        // 1. Dual Round Mode
-        // Step A: Split
+        // 1. 双轮模式
         setAnalysisProgress('正在执行 4-视窗严格切分...');
         const { part1, part2, anchors } = await splitTranscript(transcript, manualAnchors);
         
         if (!part2 || part2.length < 50) {
-           // Fallback if split failed
            console.warn("Split failed or not found, falling back to single round.");
            setAnalysisProgress('未检测到第二轮，正在进行全量质检...');
            const singleRes = await analyzeScript(
@@ -189,7 +183,6 @@ const App: React.FC = () => {
            });
            setError("AI 未能检测到明显的第二轮开始点，已自动切换为单轮质检。");
         } else {
-           // Step B: Analyze Both
            setAnalysisProgress('检测到双轮结构，正在并行分析中...');
            const [res1, res2] = await Promise.all([
              analyzeScript(
@@ -216,17 +209,25 @@ const App: React.FC = () => {
            });
         }
       } else {
-        // 2. Single Round Mode
+        // 2. 单轮模式：用锚点截取有效区间后质检
+        let effectiveText = transcript;
+        if (manualAnchors) {
+          const { r1StartPos, r1EndPos, r1EndPhrase } = manualAnchors;
+          const effectiveStart = (r1StartPos === -1 || r1StartPos === undefined) ? 0 : r1StartPos;
+          const effectiveEnd = (r1EndPos === -1 || r1EndPos === undefined) ? transcript.length : r1EndPos + (r1EndPhrase?.length || 0);
+          effectiveText = transcript.substring(effectiveStart, effectiveEnd).trim();
+          console.log(`[单轮锚点截取] 从 ${effectiveStart} 到 ${effectiveEnd}，有效文本长度: ${effectiveText.length}`);
+        }
         setAnalysisProgress('正在对比质检标准，请稍候...');
         const data = await analyzeScript(
-          transcript, 
+          effectiveText, 
           standards,
           (init) => setAnalysisBatches(init),
           (id, status) => setAnalysisBatches(prev => prev.map(b => b.id === id ? {...b, status} : b))
         );
         setResult({ 
           round1: data, 
-          round1Text: transcript,
+          round1Text: effectiveText,
           fullRawText: fullRawText,
           isDualMode: false 
         });
@@ -235,7 +236,6 @@ const App: React.FC = () => {
       setStep(AppStep.REPORT);
     } catch (err: any) {
       console.error("Analysis Error:", err);
-      // Try to extract more detailed error info from backend
       const detail = err.response?.data?.error || err.response?.data?.error_detail || err.message;
       setError(`检测失败: ${detail}。请检查网络、余额或 AI 配置。`);
       setStep(AppStep.UPLOAD_TRANSCRIPT);
@@ -550,7 +550,7 @@ const App: React.FC = () => {
                           正在扫描锚点...
                         </>
                       ) : (
-                        isDualRound ? '下一步：核对锚点' : '开始全量质检'
+                        '下一步：核对锚点'
                       )}
                     </button>
                     <p className="text-[10px] text-center text-slate-400 mt-2">
@@ -585,6 +585,7 @@ const App: React.FC = () => {
               <AnchorVerification 
                 fullText={transcript} 
                 initialAnchors={candidateAnchors} 
+                isDualRound={isDualRound}
                 onConfirm={(final) => startAnalysis(final)}
                 onBack={() => setStep(AppStep.UPLOAD_TRANSCRIPT)}
               />

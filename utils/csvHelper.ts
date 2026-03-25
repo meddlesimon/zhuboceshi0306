@@ -3,16 +3,12 @@ import { Standard, StandardType, StandardImportance, StreamMetadata } from "../t
 import { v4 as uuidv4 } from 'uuid';
 
 /**
- * Robust CSV/TSV Parser
- * Handles quoted strings (Excel style) and simple Tab/Comma separation.
+ * 纯粹的 CSV/TSV 解析器
  */
 export const parseCSV = (text: string): string[][] => {
-  // 1. Basic cleaning
   const cleanText = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
   if (!cleanText.trim()) return [];
 
-  // 2. Detect Separator
-  // Prioritize Tab (\t) because copy-paste from Excel/Feishu usually uses Tabs.
   const firstLine = cleanText.split('\n')[0];
   const tabCount = (firstLine.match(/\t/g) || []).length;
   const commaCount = (firstLine.match(/,/g) || []).length;
@@ -30,12 +26,15 @@ export const parseCSV = (text: string): string[][] => {
     if (inQuotes) {
       if (char === '"') {
         if (nextChar === '"') {
-          // Double quote inside quotes = literal quote
+          // 双引号转义 → 输出一个引号
           currentVal += '"';
           i++; 
-        } else {
-          // End of quoted cell
+        } else if (nextChar === separator || nextChar === '\n' || nextChar === undefined) {
+          // 引号后紧跟分隔符/换行/EOF → 真正的闭合引号
           inQuotes = false;
+        } else {
+          // 引号后跟其他字符 → 飞书未转义的内容中的引号，当作普通字符
+          currentVal += '"';
         }
       } else {
         currentVal += char;
@@ -57,64 +56,36 @@ export const parseCSV = (text: string): string[][] => {
     }
   }
   
-  // Push trailing data
   if (currentVal || currentRow.length > 0) {
     currentRow.push(currentVal.trim());
     rows.push(currentRow);
   }
   
-  // Filter empty rows
   return rows.filter(r => r.length > 0 && r.some(c => c !== ''));
 };
 
 /**
- * Strict Type Detection based ONLY on Category Column
- * User Requirement: Look for "一定要讲" or "绝对不可以说"
+ * 分类判定
  */
 const determineType = (val: string): StandardType => {
-  // Remove spaces and lowercase for robust matching
   const v = (val || '').replace(/\s+/g, '').toLowerCase();
-
-  // 1. Forbidden Keywords (Matches "绝对不可以说", "不能", "禁止")
-  if (
-    v.includes('不') || 
-    v.includes('禁') || 
-    v.includes('违') || 
-    v.includes('forbidden') || 
-    v.includes('ban') ||
-    v.includes('donotsay') ||
-    v.includes('dontsay')
-  ) {
+  if (v.includes('不') || v.includes('禁') || v.includes('违') || 
+      v.includes('forbidden') || v.includes('ban') || v.includes('donotsay') || v.includes('dontsay')) {
     return 'forbidden';
   }
-
-  // 2. Mandatory Keywords (Matches "一定要讲", "必须要", "要讲")
-  if (
-    v.includes('必') || 
-    v.includes('需') || 
-    v.includes('要') || // Covers "一定要讲"
-    v.includes('应') ||
-    v.includes('mandatory') || 
-    v.includes('must') || 
-    v.includes('correct')
-  ) {
+  if (v.includes('必') || v.includes('需') || v.includes('要') || v.includes('应') ||
+      v.includes('mandatory') || v.includes('must') || v.includes('correct')) {
     return 'mandatory';
   }
-
-  // 3. Fallback
-  // If the category column is completely empty or ambiguous, default to Mandatory.
-  // We prefer false positives (checking if they said it) over missing a forbidden rule check?
-  // Actually, usually "Mandatory" is the safe default for lists of talking points.
   return 'mandatory'; 
 };
 
 /**
- * Importance Detection
+ * 重要性判定
  */
 const determineImportance = (val: string): StandardImportance => {
-  if (!val) return 'high'; // Default to HIGH (Today) if missing, to ensure visibility.
+  if (!val) return 'high';
   const v = val.toLowerCase();
-  
   if (v.includes('日常') || v.includes('daily') || v.includes('normal') || v.includes('常规') || v.includes('旧')) {
     return 'normal';
   }
@@ -122,32 +93,62 @@ const determineImportance = (val: string): StandardImportance => {
 };
 
 /**
- * Main Logic: Parse Standards from loose CSV/Table data
+ * 主逻辑：从飞书/Excel 粘贴的表格数据中解析质检标准。
+ * 
+ * 飞书粘贴的特殊情况：
+ * 1. 表头可能有 20 列（含大量空列），但数据行只有 4-5 列
+ * 2. 飞书会把含换行的单元格用双引号包裹，导致"质检重点"和"标准话术"可能合并到一个字段
+ * 3. 碎片行（因单元格内换行产生的额外行）需要合并到上一条标准中
  */
 export const parseStandardsCSV = (text: string): Standard[] => {
   const rows = parseCSV(text);
   if (rows.length === 0) return [];
 
-  // A. Header Strategy
+  // A. 表头识别
   const headers = rows[0].map(h => h.trim());
   
-  // Keywords definition
   const categoryKeys = ['分类', 'Category', '类型', 'Type', '判定', '性质', 'class'];
   const importanceKeys = ['重要性', '级别', 'Priority', 'Tag', '标签', '频次', 'level'];
   const focusKeys = ['质检重点', '重点', 'Focus', 'Point', 'Rule', 'Check', '名称', 'name', '标题', 'subject'];
   const scriptKeys = ['话术', 'Script', 'Content', 'Text', 'Example', '参考', '内容', '示例', '案例', 'detail'];
 
-  // Identify Columns by Header
   let catIdx = headers.findIndex(h => categoryKeys.some(k => h.toLowerCase().includes(k.toLowerCase())));
   let impIdx = headers.findIndex(h => importanceKeys.some(k => h.toLowerCase().includes(k.toLowerCase())));
   let focusIdx = headers.findIndex(h => focusKeys.some(k => h.toLowerCase().includes(k.toLowerCase())));
   let scriptIdx = headers.findIndex(h => scriptKeys.some(k => h.toLowerCase().includes(k.toLowerCase())));
 
-  // B. Fallback Strategy: Content Analysis (if headers are missing or ambiguous)
+  // B. 【关键修复】检查数据行实际列数，修正列索引
+  // 飞书粘贴时表头可能有 20 列（含空列），但数据行只有 4 列
+  // 如果 scriptIdx 或 focusIdx 超出了数据行的列数，需要重新映射
+  if (rows.length > 1) {
+    // 找到前几个数据行的最大列数作为实际列数
+    let dataColCount = 0;
+    for (let i = 1; i < Math.min(rows.length, 10); i++) {
+      if (rows[i].length > dataColCount) dataColCount = rows[i].length;
+    }
+    
+    // 如果表头列数 > 数据列数，说明飞书粘贴带了额外空列
+    if (headers.length > dataColCount && dataColCount >= 2) {
+      // 重新计算：只在数据列范围内的表头中查找
+      const validHeaders = headers.slice(0, dataColCount);
+      
+      // 如果 scriptIdx 超出了数据列范围
+      if (scriptIdx >= dataColCount) {
+        // 话术列不可用，质检重点和话术可能合并在 focusIdx 中
+        // 寻找数据范围内的最后一个有效列作为 focus+script 合并列
+        scriptIdx = -1; // 标记为不可用
+      }
+      
+      // 如果 focusIdx 也超出范围，在数据列范围内重新查找
+      if (focusIdx >= dataColCount) {
+        focusIdx = dataColCount - 1; // 用最后一列
+      }
+    }
+  }
+
+  // C. 兜底策略
   if (rows.length > 1 && (focusIdx === -1 || scriptIdx === -1)) {
      const sampleRow = rows[1];
-     
-     // Find the longest column -> Likely the Script/Content
      if (scriptIdx === -1) {
         let maxLen = 0;
         sampleRow.forEach((cell, idx) => {
@@ -157,93 +158,140 @@ export const parseStandardsCSV = (text: string): Standard[] => {
            }
         });
      }
-
-     // Find a column that is not script, not cat, not imp -> Likely the Focus/Name
      if (focusIdx === -1) {
         focusIdx = sampleRow.findIndex((_, idx) => idx !== catIdx && idx !== impIdx && idx !== scriptIdx);
      }
   }
-
-  // If still failed, default mapping (0=Cat, 1=Focus, 2=Script)
   if (focusIdx === -1 && scriptIdx === -1 && rows[0].length >= 2) {
-      // Assuming typical format: [Category, Name, Script]
       if (catIdx === -1) catIdx = 0;
       focusIdx = 1;
       scriptIdx = 2;
   }
 
-  const standards: Standard[] = [];
-  const rawStandards: any[] = [];
+  // 如果 focusIdx 和 scriptIdx 相同（质检重点和话术合并在一个列），需要拆分
+  const isMergedColumn = focusIdx === scriptIdx;
 
-  // 1. First pass: extract raw data and calculate total length of "content"
+  // D. 遍历行，提取数据
+  const isNewDataRow = (row: string[]): boolean => {
+    if (catIdx !== -1 && catIdx < row.length && row[catIdx] && row[catIdx].trim().length > 0) return true;
+    if (impIdx !== -1 && impIdx < row.length && row[impIdx] && row[impIdx].trim().length > 0) return true;
+    if (catIdx === -1 && impIdx === -1) {
+      const hasFocus = focusIdx !== -1 && focusIdx < row.length && row[focusIdx] && row[focusIdx].trim().length > 0;
+      const hasScript = scriptIdx !== -1 && scriptIdx < row.length && row[scriptIdx] && row[scriptIdx].trim().length > 0;
+      if (hasFocus || hasScript) return true;
+    }
+    return false;
+  };
+
+  const rawStandards: any[] = [];
   let totalContentLength = 0;
 
   for (let i = 1; i < rows.length; i++) {
     const row = rows[i];
-    const rawCat = catIdx !== -1 ? row[catIdx] : '';
-    const rawImp = impIdx !== -1 ? row[impIdx] : '';
-    const rawFocus = focusIdx !== -1 ? row[focusIdx] : '';
-    const rawScript = scriptIdx !== -1 ? row[scriptIdx] : '';
+    if (row.every(c => !c || c.trim().length === 0)) continue;
 
-    if (!rawFocus && !rawScript && !rawCat) continue;
+    if (isNewDataRow(row)) {
+      const rawCat = (catIdx !== -1 && catIdx < row.length) ? (row[catIdx] || '') : '';
+      const rawImp = (impIdx !== -1 && impIdx < row.length) ? (row[impIdx] || '') : '';
+      let rawFocus = (focusIdx !== -1 && focusIdx < row.length) ? (row[focusIdx] || '') : '';
+      let rawScript = (scriptIdx !== -1 && scriptIdx < row.length) ? (row[scriptIdx] || '') : '';
 
-    const finalContent = rawScript || rawFocus;
-    const finalFocus = rawFocus || (rawScript.length > 20 ? rawScript.substring(0, 20) + '...' : rawScript);
-    const type = determineType(rawCat);
-    const importance = determineImportance(rawImp);
+      if (!rawFocus && !rawScript && !rawCat) continue;
 
-    if (type === 'mandatory') {
-      totalContentLength += finalContent.length;
+      // 如果 focus 和 script 合并在一个字段中，尝试拆分
+      // 飞书合并格式：质检重点内容（多行）后面跟着话术内容（多行）
+      // 通常质检重点是要点列表（1. xxx\n2. xxx），话术是长篇文本
+      if (isMergedColumn || (!rawScript && rawFocus.length > 50)) {
+        const mergedText = rawFocus;
+        // 尝试按段落拆分：找到第一个不以数字/序号开头的长段落作为话术
+        const paragraphs = mergedText.split('\n');
+        const focusParts: string[] = [];
+        const scriptParts: string[] = [];
+        let foundScript = false;
+        
+        for (const p of paragraphs) {
+          const trimmed = p.trim();
+          if (!trimmed) continue;
+          
+          if (!foundScript && /^[\d１２３４５６７８９０]+[.、．]/.test(trimmed)) {
+            // 以数字+点开头的行 → 质检重点
+            focusParts.push(trimmed);
+          } else if (focusParts.length > 0) {
+            // 质检重点之后的内容 → 话术
+            foundScript = true;
+            scriptParts.push(trimmed);
+          } else {
+            // 第一行就不是数字开头 → 全部当作 focus
+            focusParts.push(trimmed);
+          }
+        }
+        
+        if (focusParts.length > 0 && scriptParts.length > 0) {
+          rawFocus = focusParts.join('\n');
+          rawScript = scriptParts.join('\n');
+        }
+      }
+
+      const finalContent = rawScript || rawFocus;
+      const finalFocus = rawFocus || (rawScript.length > 20 ? rawScript.substring(0, 20) + '...' : rawScript);
+      const type = determineType(rawCat);
+      const importance = determineImportance(rawImp);
+
+      if (type === 'mandatory') {
+        totalContentLength += finalContent.length;
+      }
+
+      rawStandards.push({
+        id: uuidv4(),
+        type,
+        importance,
+        qaFocus: finalFocus,
+        content: finalContent
+      });
+    } else if (rawStandards.length > 0) {
+      // 碎片行：追加到上一条标准的 content
+      const fragment = row.filter(c => c && c.trim().length > 0).join('\n').trim();
+      if (fragment) {
+        const prev = rawStandards[rawStandards.length - 1];
+        prev.content = (prev.content + '\n' + fragment).trim();
+        if (prev.type === 'mandatory') {
+          totalContentLength += fragment.length + 1;
+        }
+      }
     }
-
-    rawStandards.push({
-      id: uuidv4(),
-      type,
-      importance,
-      qaFocus: finalFocus,
-      content: finalContent
-    });
   }
 
-  // 2. Second pass: calculate theoretical_pos based on content length density
+  // E. 计算 theoretical_pos
+  const standards: Standard[] = [];
   let accumulatedContentLength = 0;
   for (const s of rawStandards) {
-    let theoretical_pos = 0.5; // Default for forbidden
+    let theoretical_pos = 0.5;
     if (s.type === 'mandatory' && totalContentLength > 0) {
-      // Ratio = (previous length + current length / 2) / total length
       theoretical_pos = (accumulatedContentLength + s.content.length / 2) / totalContentLength;
       accumulatedContentLength += s.content.length;
     }
-
-    standards.push({
-      ...s,
-      theoretical_pos
-    });
+    standards.push({ ...s, theoretical_pos });
   }
 
   return standards;
 };
 
 /**
- * Parse Transcript (Simple text extraction from CSV/Text)
+ * Parse Transcript
  */
 export const parseTranscript = (text: string): string => {
   const rows = parseCSV(text);
   if (rows.length === 0) return text;
   
-  // If it's just one column or plain text, return as is (joined)
   if (rows.every(r => r.length <= 1)) {
     return rows.map(r => r[0]).join('\n');
   }
 
-  // If it looks like a transcript table (Time, Speaker, Content)
-  // Try to find the Content column
   const headers = rows[0].map(h => h.toLowerCase());
   const contentKeywords = ['text', 'content', '内容', '字幕', '原话', '文本'];
   let textIdx = headers.findIndex(h => contentKeywords.some(k => h.includes(k)));
 
   if (textIdx === -1) {
-    // Guess: Column with longest average length
     let maxAvg = 0;
     let bestIdx = -1;
     const numCols = rows[0].length;
@@ -264,16 +312,13 @@ export const parseTranscript = (text: string): string => {
       }
     }
     
-    // If average length > 10 chars, assume it's the transcript
     if (maxAvg > 10) textIdx = bestIdx;
   }
 
   if (textIdx !== -1) {
-    // Return only that column, skipping header
     return rows.slice(1).map(r => r[textIdx]).join('\n');
   }
 
-  // Fallback: Join all columns
   return rows.map(r => r.join(' ')).join('\n');
 };
 

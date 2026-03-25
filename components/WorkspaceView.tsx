@@ -112,11 +112,8 @@ const WorkspaceView: React.FC<Props> = ({ anchor, onBack }) => {
     }
   };
 
+  // 单轮和双轮都走锚点扫描流程
   const startScanningAnchors = async () => {
-    if (!isDualRound) {
-      await submitTask(null);
-      return;
-    }
     setIsScanning(true);
     setError(null);
     try {
@@ -306,6 +303,7 @@ const WorkspaceView: React.FC<Props> = ({ anchor, onBack }) => {
           <AnchorVerification
             fullText={transcript}
             initialAnchors={candidateAnchors}
+            isDualRound={isDualRound}
             onConfirm={(final) => submitTask(final)}
             onBack={() => setPanelMode('new-check')}
           />
@@ -576,7 +574,7 @@ const WorkspaceView: React.FC<Props> = ({ anchor, onBack }) => {
               >
                 {isScanning ? (
                   <><Loader2 size={16} className="animate-spin" /> 正在扫描锚点...</>
-                ) : isDualRound ? '下一步：核对锚点' : '开始质检'}
+                ) : '下一步：核对锚点'}
               </button>
               <p className="text-[10px] text-center text-slate-400 mt-2">
                 提交后后台运行，可关闭页面

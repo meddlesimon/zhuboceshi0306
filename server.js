@@ -179,9 +179,22 @@ function findAnchorIndex(fullText, anchor, type = 'start') {
   return fullText.indexOf(shortAnchor);
 }
 
+// 辅助函数：清洗话术文本中的特殊字符，避免 prompt 解析或 API 调用错误
+function sanitizePromptText(text) {
+  if (!text) return '';
+  return text
+    .replace(/[\u201C\u201D]/g, "'")
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .replace(/ {3,}/g, ' ')
+    .trim();
+}
+
 // 1. API Endpoint: Check Single Window (Mandatory with Toxicity)
 app.post('/api/check-single-window', async (req, res) => {
-  const { windowText, standardContent, ruleName } = req.body;
+  let { windowText, standardContent, ruleName } = req.body;
+  // 清洗话术文本，避免特殊引号/零宽字符导致 API 500 错误
+  ruleName = sanitizePromptText(ruleName);
+  standardContent = sanitizePromptText(standardContent);
   
   // 1.3倍长度提示词计算
   const targetLength = Math.floor(standardContent.length * 1.3);
@@ -738,30 +751,87 @@ const DEFAULT_DB = {
   ]
 };
 
+// ---- 内存缓存数据库（避免每次 API 调用都读取 85MB+ 的 JSON 文件） ----
+let _dbCache = null;
+let _dbSaveTimer = null;
+
 function loadDB() {
+  if (_dbCache) return _dbCache;
   try {
     if (existsSync(DB_PATH)) {
-      return JSON.parse(readFileSync(DB_PATH, 'utf-8'));
+      _dbCache = JSON.parse(readFileSync(DB_PATH, 'utf-8'));
+      return _dbCache;
     }
   } catch (e) {
     console.error('[DB] Load error:', e.message);
   }
-  return JSON.parse(JSON.stringify(DEFAULT_DB));
+  _dbCache = JSON.parse(JSON.stringify(DEFAULT_DB));
+  return _dbCache;
 }
 
 function saveDB(data) {
-  try {
-    writeFileSync(DB_PATH, JSON.stringify(data, null, 2), 'utf-8');
-  } catch (e) {
-    console.error('[DB] Save error:', e.message);
-  }
+  _dbCache = data; // 立即更新内存缓存
+  // 防抖写入磁盘：500ms 内多次调用只写一次
+  if (_dbSaveTimer) clearTimeout(_dbSaveTimer);
+  _dbSaveTimer = setTimeout(() => {
+    try {
+      writeFileSync(DB_PATH, JSON.stringify(data, null, 2), 'utf-8');
+    } catch (e) {
+      console.error('[DB] Save error:', e.message);
+    }
+  }, 500);
 }
 
-// 初始化：如果不存在就写入默认数据
+// 辅助函数：清理任务结果中的冗余大字段，大幅减小存储体积
+function cleanupTaskResult(task) {
+  if (task.result_json) {
+    ['round1', 'round2'].forEach(round => {
+      const r = task.result_json[round];
+      if (r && r.mandatory_checks) {
+        r.mandatory_checks.forEach(check => {
+          delete check.windowSnippet;    // 6000字/条，81条 = ~500KB
+          delete check.standardContent;  // 重复存储的话术原文
+        });
+      }
+    });
+    // 清理保存的完整转录文本（可能几万字）
+    delete task.result_json.fullRawText;
+  }
+  return task;
+}
+
+// 初始化：加载数据库并执行一次性清理
 if (!existsSync(DB_PATH)) {
   saveDB(DEFAULT_DB);
   console.log('[DB] JSON database initialized at', DB_PATH);
 } else {
+  const db = loadDB();
+  // 一次性清理已有任务中的冗余字段
+  let cleaned = 0;
+  (db.tasks || []).forEach(t => {
+    if (t.result_json) {
+      ['round1', 'round2'].forEach(round => {
+        const r = t.result_json[round];
+        if (r && r.mandatory_checks) {
+          r.mandatory_checks.forEach(check => {
+            if (check.windowSnippet) { delete check.windowSnippet; cleaned++; }
+            if (check.standardContent) { delete check.standardContent; cleaned++; }
+          });
+        }
+      });
+      if (t.result_json.fullRawText) { delete t.result_json.fullRawText; cleaned++; }
+    }
+  });
+  if (cleaned > 0) {
+    console.log(`[DB] 清理了 ${cleaned} 个冗余字段，正在保存...`);
+    // 直接同步写入（不用防抖）
+    try {
+      writeFileSync(DB_PATH, JSON.stringify(db, null, 2), 'utf-8');
+      console.log('[DB] 清理完成，数据库已压缩');
+    } catch (e) {
+      console.error('[DB] 清理保存失败:', e.message);
+    }
+  }
   console.log('[DB] JSON database loaded from', DB_PATH);
 }
 
@@ -820,6 +890,56 @@ app.delete('/api/anchors/:id', (req, res) => {
 // ============================================================
 // API：话术版本管理（全局共用）
 // ============================================================
+
+// 调试接口：分析粘贴文本的 CSV 解析结果
+app.post('/api/debug-parse', (req, res) => {
+  const { text } = req.body;
+  if (!text) return res.status(400).json({ error: '缺少 text' });
+  
+  const cleanText = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  const firstLine = cleanText.split('\n')[0];
+  const tabCount = (firstLine.match(/\t/g) || []).length;
+  const separator = tabCount >= 1 ? '\t' : ',';
+  
+  const lines = cleanText.split('\n');
+  const rows = lines.map(line => line.split(separator));
+  
+  const headerCols = rows[0] ? rows[0].length : 0;
+  
+  // 输出到服务器日志
+  console.log('[DEBUG-PARSE] ===========================');
+  console.log('[DEBUG-PARSE] 总行数:', lines.length, '| 表头列数:', headerCols, '| 分隔符:', separator === '\t' ? 'TAB' : 'COMMA');
+  console.log('[DEBUG-PARSE] 表头:', rows[0] ? rows[0].map((h, i) => `[${i}]="${h.trim().substring(0, 20)}"`).join(' | ') : '无');
+  
+  // 逐行输出前 30 行的关键信息
+  for (let i = 0; i < Math.min(rows.length, 30); i++) {
+    const row = rows[i];
+    const nonEmpty = row.filter(c => c.trim().length > 0).length;
+    const preview = row.map((c, j) => `[${j}]=${c.trim().substring(0, 35)}`).join(' | ');
+    console.log(`[DEBUG-PARSE] 行${i}: ${row.length}列(${nonEmpty}非空) ${preview}`);
+  }
+  
+  if (rows.length > 30) {
+    console.log('[DEBUG-PARSE] ...省略后续 ' + (rows.length - 30) + ' 行');
+  }
+  console.log('[DEBUG-PARSE] ===========================');
+  
+  const analysis = {
+    totalLines: lines.length,
+    totalRows: rows.length,
+    headerCols,
+    headers: rows[0] ? rows[0].map((h, i) => `[${i}]="${h.trim().substring(0, 30)}"`).join(' | ') : '',
+    separator: separator === '\t' ? 'TAB' : 'COMMA',
+    rows: rows.slice(0, 200).map((row, i) => ({
+      rowIdx: i,
+      colCount: row.length,
+      nonEmpty: row.filter(c => c.trim().length > 0).length,
+      preview: row.map((c, j) => `[${j}]=${c.trim().substring(0, 40)}`).join(' | ')
+    }))
+  };
+  
+  res.json(analysis);
+});
 
 // 获取所有话术版本列表（不含content_json，节省带宽）
 app.get('/api/standards', (req, res) => {
@@ -888,6 +1008,24 @@ app.post('/api/standards', (req, res) => {
   }
 });
 
+// 删除话术版本（不能删除当前使用中的版本）
+app.delete('/api/standards/:id', (req, res) => {
+  const id = parseInt(req.params.id);
+  try {
+    const db = loadDB();
+    const idx = db.standards_versions.findIndex(v => v.id === id);
+    if (idx === -1) return res.status(404).json({ error: '版本不存在' });
+    if (db.standards_versions[idx].is_current === 1) {
+      return res.status(400).json({ error: '不能删除当前使用中的版本' });
+    }
+    db.standards_versions.splice(idx, 1);
+    saveDB(db);
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ============================================================
 // API：质检任务管理
 // ============================================================
@@ -941,6 +1079,10 @@ function updateTaskInDB(taskId, updates) {
   const idx = db.tasks.findIndex(t => t.id === taskId);
   if (idx !== -1) {
     Object.assign(db.tasks[idx], updates);
+    // 如果更新包含 result_json，清理冗余字段后再保存
+    if (updates.result_json) {
+      cleanupTaskResult(db.tasks[idx]);
+    }
     saveDB(db);
   }
 }
@@ -1018,9 +1160,19 @@ async function runTaskInBackground(taskId, stdVer, transcriptText, isDual, manua
         }
       }
     } else {
+      // 单轮模式：如果有手动锚点，截取有效区间后质检
+      let effectiveText = transcriptText;
+      if (manualAnchors && manualAnchors.r1StartPos !== undefined) {
+        const effectiveStart = (manualAnchors.r1StartPos === -1 || manualAnchors.r1StartPos == null) ? 0 : manualAnchors.r1StartPos;
+        const effectiveEnd = (manualAnchors.r1EndPos === -1 || manualAnchors.r1EndPos == null)
+          ? transcriptText.length
+          : manualAnchors.r1EndPos + (manualAnchors.r1EndPhrase ? manualAnchors.r1EndPhrase.length : 0);
+        effectiveText = transcriptText.substring(effectiveStart, effectiveEnd).trim();
+        console.log(`[单轮锚点截取] 从 ${effectiveStart} 到 ${effectiveEnd}，有效文本长度: ${effectiveText.length}`);
+      }
       updateTaskInDB(taskId, { progress_message: '单轮质检中...' });
-      const r1 = await runSingleRoundAnalysis(transcriptText, standards);
-      result = { round1: r1, round1Text: transcriptText, fullRawText: transcriptText, isDualMode: false };
+      const r1 = await runSingleRoundAnalysis(effectiveText, standards);
+      result = { round1: r1, round1Text: effectiveText, fullRawText: transcriptText, isDualMode: false };
     }
 
     const scoreR1 = calcScoreFromResult(result.round1);
@@ -1071,43 +1223,63 @@ async function callInternalSplit(fullText) {
   return safeJsonParse(resultText);
 }
 
-// 单轮分析
+// 单条 mandatory 检查 + 超时自动重试（最多重试 maxRetries 次）
+async function checkSingleMandatoryWithRetry(std, transcriptText, maxRetries = 1) {
+  const WINDOW_SIZE = 6000;
+  const pos = std.theoretical_pos || 0.5;
+  const textLen = transcriptText.length;
+  const center = Math.floor(pos * textLen);
+  const start = Math.max(0, center - WINDOW_SIZE / 2);
+  const windowText = transcriptText.slice(start, start + WINDOW_SIZE);
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const resp = await axios.post(`http://127.0.0.1:${PORT}/api/check-single-window`, {
+        windowText, standardContent: std.content, ruleName: std.qaFocus
+      }, { timeout: 120000 });
+      return {
+        standard: std.qaFocus,
+        status: resp.data.detected ? 'passed' : 'missed',
+        score: resp.data.score || 0,
+        performance_grade: resp.data.performance_grade,
+        detected_content: resp.data.core_evidence || '',
+        comment: resp.data.reason_or_comment || '',
+        standardContent: std.content,
+        windowSnippet: windowText,
+        topic_scene: resp.data.topic_scene || ''
+      };
+    } catch (e) {
+      if (attempt < maxRetries) {
+        console.warn(`[重试] 第${attempt + 1}次失败 (${e.message.substring(0, 50)})，3秒后重试: ${std.qaFocus.substring(0, 30)}...`);
+        await new Promise(r => setTimeout(r, 3000));
+        continue;
+      }
+      console.error(`[最终失败] ${std.qaFocus.substring(0, 30)}... 错误: ${e.message.substring(0, 60)}`);
+      return {
+        standard: std.qaFocus, status: 'missed', score: 0,
+        comment: '分析出错: ' + e.message, standardContent: std.content, windowSnippet: windowText
+      };
+    }
+  }
+}
+
+// 单轮分析（分批并发 + 超时重试，避免 API 限流）
 async function runSingleRoundAnalysis(transcriptText, standards) {
   const mandatory = standards.filter(s => s.type === 'mandatory');
   const forbidden = standards.filter(s => s.type === 'forbidden');
 
-  const mandatoryResults = await Promise.all(
-    mandatory.map(async (std) => {
-      const WINDOW_SIZE = 6000;
-      const pos = std.theoretical_pos || 0.5;
-      const textLen = transcriptText.length;
-      const center = Math.floor(pos * textLen);
-      const start = Math.max(0, center - WINDOW_SIZE / 2);
-      const windowText = transcriptText.slice(start, start + WINDOW_SIZE);
+  // 分批并发：每批 BATCH_SIZE 条并行，批间串行，避免 81 条全并发打爆 API
+  const BATCH_SIZE = 5;
+  const mandatoryResults = [];
 
-      try {
-        const resp = await axios.post(`http://127.0.0.1:${PORT}/api/check-single-window`, {
-          windowText, standardContent: std.content, ruleName: std.qaFocus
-        }, { timeout: 120000 });
-        return {
-          standard: std.qaFocus,
-          status: resp.data.detected ? 'passed' : 'missed',
-          score: resp.data.score || 0,
-          performance_grade: resp.data.performance_grade,
-          detected_content: resp.data.core_evidence || '',
-          comment: resp.data.reason_or_comment || '',
-          standardContent: std.content,
-          windowSnippet: windowText,
-          topic_scene: resp.data.topic_scene || ''
-        };
-      } catch (e) {
-        return {
-          standard: std.qaFocus, status: 'missed', score: 0,
-          comment: '分析出错: ' + e.message, standardContent: std.content, windowSnippet: windowText
-        };
-      }
-    })
-  );
+  for (let batchStart = 0; batchStart < mandatory.length; batchStart += BATCH_SIZE) {
+    const batch = mandatory.slice(batchStart, batchStart + BATCH_SIZE);
+    console.log(`[质检进度] 处理第 ${batchStart + 1}-${batchStart + batch.length} 条 / 共 ${mandatory.length} 条`);
+    const batchResults = await Promise.all(
+      batch.map(std => checkSingleMandatoryWithRetry(std, transcriptText))
+    );
+    mandatoryResults.push(...batchResults);
+  }
 
   let forbiddenResults = [];
   if (forbidden.length > 0) {

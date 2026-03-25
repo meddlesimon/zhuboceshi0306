@@ -34,6 +34,7 @@ interface AnchorVerificationProps {
     r2EndPhrase: string | null;
     r2EndPos: number;
   };
+  isDualRound?: boolean; // 新增：是否双轮模式，默认 true
   onConfirm: (finalAnchors: any) => void;
   onBack: () => void;
 }
@@ -50,13 +51,25 @@ function buildLineOffsets(text: string): number[] {
   return offsets;
 }
 
-const AnchorVerification: React.FC<AnchorVerificationProps> = ({ fullText, initialAnchors, onConfirm, onBack }) => {
-  const [anchors, setAnchors] = useState<Anchor[]>([
-    { id: 'r1_start', name: '第一轮开始', phrase: initialAnchors.r1StartPhrase, pos: initialAnchors.r1StartPos, range: [0, 0.15], color: 'text-green-600', bgColor: 'bg-green-50' },
-    { id: 'r1_end', name: '第一轮结束', phrase: initialAnchors.r1EndPhrase, pos: initialAnchors.r1EndPos, range: [0.35, 0.60], color: 'text-red-600', bgColor: 'bg-red-50' },
-    { id: 'r2_start', name: '第二轮开始', phrase: initialAnchors.r2StartPhrase, pos: initialAnchors.r2StartPos, range: [0.50, 0.65], color: 'text-blue-600', bgColor: 'bg-blue-50' },
-    { id: 'r2_end', name: '第二轮结束', phrase: initialAnchors.r2EndPhrase, pos: initialAnchors.r2EndPos, range: [0.85, 1.0], color: 'text-purple-600', bgColor: 'bg-purple-50' },
-  ]);
+const AnchorVerification: React.FC<AnchorVerificationProps> = ({ fullText, initialAnchors, isDualRound = true, onConfirm, onBack }) => {
+  // 根据单轮/双轮模式初始化不同数量的锚点
+  const [anchors, setAnchors] = useState<Anchor[]>(() => {
+    if (isDualRound) {
+      // 双轮模式：4 个锚点
+      return [
+        { id: 'r1_start', name: '第一轮开始', phrase: initialAnchors.r1StartPhrase, pos: initialAnchors.r1StartPos, range: [0, 0.15], color: 'text-green-600', bgColor: 'bg-green-50' },
+        { id: 'r1_end', name: '第一轮结束', phrase: initialAnchors.r1EndPhrase, pos: initialAnchors.r1EndPos, range: [0.35, 0.60], color: 'text-red-600', bgColor: 'bg-red-50' },
+        { id: 'r2_start', name: '第二轮开始', phrase: initialAnchors.r2StartPhrase, pos: initialAnchors.r2StartPos, range: [0.50, 0.65], color: 'text-blue-600', bgColor: 'bg-blue-50' },
+        { id: 'r2_end', name: '第二轮结束', phrase: initialAnchors.r2EndPhrase, pos: initialAnchors.r2EndPos, range: [0.85, 1.0], color: 'text-purple-600', bgColor: 'bg-purple-50' },
+      ];
+    } else {
+      // 单轮模式：只需要 2 个锚点（开始 + 结束）
+      return [
+        { id: 'r1_start', name: '质检区间开始', phrase: initialAnchors.r1StartPhrase, pos: initialAnchors.r1StartPos, range: [0, 0.15], color: 'text-green-600', bgColor: 'bg-green-50' },
+        { id: 'r1_end', name: '质检区间结束', phrase: initialAnchors.r1EndPhrase, pos: initialAnchors.r1EndPos, range: [0.85, 1.0], color: 'text-red-600', bgColor: 'bg-red-50' },
+      ];
+    }
+  });
 
   const [activeAnchorId, setActiveAnchorId] = useState<string | null>(null);
   const [highlightedRange, setHighlightedRange] = useState<{ start: number, end: number } | null>(null);
@@ -164,15 +177,27 @@ const AnchorVerification: React.FC<AnchorVerificationProps> = ({ fullText, initi
   };
 
   const handleConfirm = () => {
-    if (anchors[0].pos !== -1 && anchors[1].pos !== -1 && anchors[1].pos < anchors[0].pos) return alert("第一轮结束点不能早于第一轮开始点");
-    if (anchors[1].pos !== -1 && anchors[2].pos !== -1 && anchors[2].pos < anchors[1].pos) return alert("第二轮开始点不能早于第一轮结束点");
-    if (anchors[2].pos !== -1 && anchors[3].pos !== -1 && anchors[3].pos < anchors[2].pos) return alert("第二轮结束点不能早于第二轮开始点");
-    onConfirm({
-      r1StartPhrase: anchors[0].phrase, r1StartPos: anchors[0].pos,
-      r1EndPhrase: anchors[1].phrase, r1EndPos: anchors[1].pos,
-      r2StartPhrase: anchors[2].phrase, r2StartPos: anchors[2].pos,
-      r2EndPhrase: anchors[3].phrase, r2EndPos: anchors[3].pos,
-    });
+    if (isDualRound) {
+      // 双轮模式：校验 4 个锚点的顺序
+      if (anchors[0].pos !== -1 && anchors[1].pos !== -1 && anchors[1].pos < anchors[0].pos) return alert("第一轮结束点不能早于第一轮开始点");
+      if (anchors[1].pos !== -1 && anchors[2].pos !== -1 && anchors[2].pos < anchors[1].pos) return alert("第二轮开始点不能早于第一轮结束点");
+      if (anchors[2].pos !== -1 && anchors[3].pos !== -1 && anchors[3].pos < anchors[2].pos) return alert("第二轮结束点不能早于第二轮开始点");
+      onConfirm({
+        r1StartPhrase: anchors[0].phrase, r1StartPos: anchors[0].pos,
+        r1EndPhrase: anchors[1].phrase, r1EndPos: anchors[1].pos,
+        r2StartPhrase: anchors[2].phrase, r2StartPos: anchors[2].pos,
+        r2EndPhrase: anchors[3].phrase, r2EndPos: anchors[3].pos,
+      });
+    } else {
+      // 单轮模式：校验 2 个锚点的顺序
+      if (anchors[0].pos !== -1 && anchors[1].pos !== -1 && anchors[1].pos < anchors[0].pos) return alert("结束点不能早于开始点");
+      onConfirm({
+        r1StartPhrase: anchors[0].phrase, r1StartPos: anchors[0].pos,
+        r1EndPhrase: anchors[1].phrase, r1EndPos: anchors[1].pos,
+        r2StartPhrase: null, r2StartPos: -1,
+        r2EndPhrase: null, r2EndPos: -1,
+      });
+    }
   };
 
   // 渲染文本行，支持锚点高亮（蓝色）和搜索高亮（当前命中橙色，其余黄色）
@@ -330,7 +355,11 @@ const AnchorVerification: React.FC<AnchorVerificationProps> = ({ fullText, initi
               <Target size={16} />
               锚点核对
             </h3>
-            <p className="text-[11px] opacity-75 mt-0.5">确认或手动修正 AI 找出的四个分界点</p>
+            <p className="text-[11px] opacity-75 mt-0.5">
+              {isDualRound 
+                ? '确认或手动修正 AI 找出的四个分界点' 
+                : '确认或手动修正质检区间的开始和结束点'}
+            </p>
           </div>
 
           {/* 锚点卡片列表 */}
