@@ -31,7 +31,9 @@ import {
   FileSearch,
   ChevronUp,
   ChevronDown,
-  MousePointer2
+  MousePointer2,
+  MapPin,
+  Video
 } from 'lucide-react';
 import AdminAuditView from './AdminAuditView';
 
@@ -44,6 +46,7 @@ interface ReportViewProps {
   metadata: StreamMetadata;
   onReset: () => void;
   onRegisterActions?: (actions: React.ReactNode) => void;
+  videoSegments?: { start: number; end: number; text: string }[];  // ASR 时间戳片段
 }
 
 
@@ -203,7 +206,7 @@ const ExpandableText: React.FC<{ text: string, maxLen?: number, className?: stri
   );
 };
 
-const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, onReset, onRegisterActions }) => {
+const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, onReset, onRegisterActions, videoSegments }) => {
   const [isExporting, setIsExporting] = useState(false);
   const [activeRound, setActiveRound] = useState<'round1' | 'round2'>('round1');
   const [highlightQuote, setHighlightQuote] = useState<string>('');
@@ -218,9 +221,22 @@ const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, on
   const [searchMatches, setSearchMatches] = useState<number[]>([]); 
   const [currentMatchIndex, setCurrentMatchIndex] = useState(-1);
   const [scrollPercent, setScrollPercent] = useState(0);
+  const [selectionPopup, setSelectionPopup] = useState<{ text: string; x: number; y: number } | null>(null);
+  // 中间报告 vs 右侧面板的可拖拽宽度
+  const [rightPanelPct, setRightPanelPct] = useState(() => {
+    try { return parseFloat(localStorage.getItem('qc_right_width') || '38') || 38; } catch { return 38; }
+  });
+  const isDragging2Ref = useRef(false);
+  const layoutContainerRef = useRef<HTMLDivElement>(null);
   
   // Local State for Reviews
   const [localResult, setLocalResult] = useState<MultiRoundResult>(result);
+
+  // 如果有 ASR 时间戳片段，用它的文字作为全文（保证和时间戳完全一致）
+  const asrFullText = useMemo(() => {
+    if (!videoSegments || videoSegments.length === 0) return '';
+    return videoSegments.map(s => s.text).join('');
+  }, [videoSegments]);
 
   const reportRef = useRef<HTMLDivElement>(null);
   const transcriptRef = useRef<HTMLDivElement>(null);
@@ -888,12 +904,150 @@ const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, on
   };
 
   /**
-   * 增强型文本渲染逻辑：支持 AI 高亮 + 搜索高亮 + 瞬间定位
+   * 增强型文本渲染逻辑：支持 30 秒分段 + AI 高亮 + 搜索高亮
    */
+  const formatTimestamp = (sec: number) => {
+    if (!sec || isNaN(sec)) return '0:00';
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = Math.floor(sec % 60);
+    if (h > 0) return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+    return `${m}:${s.toString().padStart(2, '0')}`;
+  };
+
+  // 把 videoSegments 按 30 秒合并
+  const mergedSegments = useMemo(() => {
+    if (!videoSegments || videoSegments.length === 0) return [];
+    const MERGE_SEC = 30;
+    const merged: { start: number; end: number; text: string }[] = [];
+    let group: { start: number; end: number; text: string } | null = null;
+    for (const seg of videoSegments) {
+      const segStart = seg.start;
+      if (!group || segStart - group.start >= MERGE_SEC) {
+        group = { start: segStart, end: seg.end, text: seg.text };
+        merged.push(group);
+      } else {
+        group.end = seg.end;
+        group.text += seg.text;
+      }
+    }
+    return merged;
+  }, [videoSegments]);
+
   const renderHighlightedTranscript = () => {
-    const fullText = activeRound === 'round1' ? localResult.round1Text : (localResult.round2Text || localResult.round1Text);
+    const fullText = asrFullText || (activeRound === 'round1' ? localResult.round1Text : (localResult.round2Text || localResult.round1Text));
     if (!fullText) return "暂无原文数据";
 
+    // 有分段数据时：按 30 秒分段渲染
+    if (mergedSegments.length > 0) {
+      // 计算 AI 定位高亮在全文中的位置
+      let aiGlobalStart = -1, aiGlobalEnd = -1;
+      if (highlightQuote) {
+        // 拼接所有段的文本，计算全局偏移
+        let globalText = '';
+        const segOffsets: number[] = [];
+        mergedSegments.forEach(seg => {
+          segOffsets.push(globalText.length);
+          globalText += seg.text;
+        });
+        const match = findBestMatch(globalText, highlightQuote);
+        if (match.found) {
+          aiGlobalStart = match.start;
+          aiGlobalEnd = match.end;
+        }
+      }
+
+      // 计算每段在全文中的偏移
+      let runningOffset = 0;
+      const segWithOffsets = mergedSegments.map(seg => {
+        const offset = runningOffset;
+        runningOffset += seg.text.length;
+        return { ...seg, globalOffset: offset };
+      });
+
+      // 渲染函数：同时处理搜索高亮和 AI 定位高亮
+      const highlightText = (text: string, globalOffset: number) => {
+        const intervals: { start: number; end: number; type: 'ai' | 'search' }[] = [];
+
+        // AI 高亮（黄底）
+        if (aiGlobalStart >= 0) {
+          const localStart = aiGlobalStart - globalOffset;
+          const localEnd = aiGlobalEnd - globalOffset;
+          if (localEnd > 0 && localStart < text.length) {
+            intervals.push({ start: Math.max(0, localStart), end: Math.min(text.length, localEnd), type: 'ai' });
+          }
+        }
+
+        // 搜索高亮（蓝底）
+        if (searchTerm && searchTerm.length >= 1) {
+          const lower = text.toLowerCase();
+          const lowerSearch = searchTerm.toLowerCase();
+          let pos = 0;
+          while ((pos = lower.indexOf(lowerSearch, pos)) !== -1) {
+            intervals.push({ start: pos, end: pos + searchTerm.length, type: 'search' });
+            pos += searchTerm.length;
+          }
+        }
+
+        if (intervals.length === 0) return text;
+
+        // 按位置排序
+        intervals.sort((a, b) => a.start - b.start);
+
+        const parts: React.ReactNode[] = [];
+        let lastIdx = 0;
+        intervals.forEach((iv, i) => {
+          if (iv.start > lastIdx) parts.push(text.substring(lastIdx, iv.start));
+          if (iv.start < lastIdx) return;
+          const content = text.substring(iv.start, iv.end);
+          if (iv.type === 'ai') {
+            parts.push(
+              <span key={`ai-${i}`} className="bg-yellow-200 text-slate-900 font-bold px-0.5 rounded border-b-2 border-yellow-400 highlight-active">
+                {content}
+              </span>
+            );
+          } else {
+            parts.push(
+              <span key={`s-${i}`} className="bg-blue-100 text-blue-800 px-0.5 rounded border-b border-blue-300">
+                {content}
+              </span>
+            );
+          }
+          lastIdx = iv.end;
+        });
+        if (lastIdx < text.length) parts.push(text.substring(lastIdx));
+        return <>{parts}</>;
+      };
+
+      return (
+        <div className="space-y-0">
+          {segWithOffsets.map((seg, idx) => (
+            <div key={idx} className="border-b border-slate-100 last:border-b-0">
+              {/* 时间标签 — 在上方，可点击跳转 */}
+              <div
+                className="sticky top-0 bg-slate-50 px-3 py-1 cursor-pointer hover:bg-blue-50 transition-colors flex items-center gap-1.5 z-[5]"
+                onClick={() => {
+                  if ((window as any).__reportVideoSeek) {
+                    (window as any).__reportVideoSeek(seg.start);
+                  }
+                }}
+                title={`点击跳转到 ${formatTimestamp(seg.start)}`}
+              >
+                <span className="text-[10px] text-blue-500 font-mono font-bold">
+                  {formatTimestamp(seg.start)} - {formatTimestamp(seg.end)}
+                </span>
+              </div>
+              {/* 正文 */}
+              <div className="px-3 py-2 text-[13px] leading-relaxed text-slate-700">
+                {highlightText(seg.text, seg.globalOffset)}
+              </div>
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    // 无分段数据时：回退到原来的纯文本渲染
     // 1. 处理 AI 定位 (黄底)
     let aiMatch = { start: -1, end: -1 };
     if (highlightQuote) {
@@ -922,23 +1076,16 @@ const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, on
     // 3. 混合渲染逻辑
     const elements: React.ReactNode[] = [];
     let lastIdx = 0;
-
-    // 将所有需要高亮的区间合并排序
     const allIntervals: { start: number; end: number; type: 'ai' | 'search'; isCurrent?: boolean; searchIdx?: number }[] = [];
     if (aiMatch.start !== -1) allIntervals.push({ ...aiMatch, type: 'ai' });
     matches.forEach((m, idx) => allIntervals.push({ ...m, type: 'search', searchIdx: idx }));
-    
     allIntervals.sort((a, b) => a.start - b.start || b.end - a.end);
 
     allIntervals.forEach((interval, i) => {
-      // 填充之前的普通文本
       if (interval.start > lastIdx) {
         elements.push(fullText.substring(lastIdx, interval.start));
       }
-      
-      // 避免重复渲染
       if (interval.start < lastIdx) return;
-
       const content = fullText.substring(interval.start, interval.end);
       if (interval.type === 'ai') {
         elements.push(
@@ -975,7 +1122,7 @@ const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, on
       setCurrentMatchIndex(-1);
       return;
     }
-    const fullText = activeRound === 'round1' ? localResult.round1Text : (localResult.round2Text || localResult.round1Text);
+    const fullText = asrFullText || (activeRound === 'round1' ? localResult.round1Text : (localResult.round2Text || localResult.round1Text));
     const lowerFull = fullText.toLowerCase();
     const lowerSearch = searchTerm.toLowerCase();
     const indices: number[] = [];
@@ -1011,17 +1158,42 @@ const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, on
     }
   };
 
+  // 右侧分割线拖拽
+  const handleRightDragStart = (e: React.MouseEvent) => {
+    e.preventDefault();
+    isDragging2Ref.current = true;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    const onMove = (ev: MouseEvent) => {
+      if (!isDragging2Ref.current || !layoutContainerRef.current) return;
+      const rect = layoutContainerRef.current.getBoundingClientRect();
+      const fromRight = ((rect.right - ev.clientX) / rect.width) * 100;
+      const clamped = Math.min(Math.max(fromRight, 25), 55);
+      setRightPanelPct(clamped);
+    };
+    const onUp = () => {
+      isDragging2Ref.current = false;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      setRightPanelPct(w => { try { localStorage.setItem('qc_right_width', String(w)); } catch {} return w; });
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  };
+
   return (
-    <div className="pb-4 animate-in slide-in-from-bottom-8 fade-in duration-500 bg-slate-50 min-h-screen">
+    <div className="animate-in fade-in duration-500 bg-slate-50 h-full">
       
-      {/* 并排布局区域：顶部只有 44px 导航栏，内容区始终最大化 */}
-      <div className={`flex justify-start items-start gap-6 px-4 py-2 mx-auto transition-all duration-500 overflow-hidden h-[calc(100vh-44px)] ${showAdminAudit ? 'max-w-full w-full' : 'max-w-[600px] justify-center'}`}>
+      {/* 并排布局区域 */}
+      <div ref={layoutContainerRef} className={`flex justify-start items-stretch gap-0 px-0 py-0 mx-auto transition-all duration-300 overflow-hidden h-full ${showAdminAudit ? 'max-w-full w-full' : 'max-w-[700px] justify-center'}`}>
         
         {/* 左侧：质检报告 - 宽度锁定，独立滚动，绝不动弹 */}
         <div 
           id="report-content" 
           ref={reportRef} 
-          className={`bg-white transition-all duration-300 shadow-xl rounded-2xl w-[600px] shrink-0 p-8 md:p-10 h-full overflow-y-auto custom-scrollbar ${!showAdminAudit ? 'mx-auto' : 'ml-4'}`}
+          className={`bg-white transition-all duration-300 shadow-sm border-r border-slate-100 flex-1 min-w-0 shrink p-4 md:p-6 h-full overflow-y-auto custom-scrollbar`}
         >
           {/* METADATA HEADER */}
           <div className="mb-8 border-b-2 border-slate-900 pb-6">
@@ -1618,9 +1790,19 @@ const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, on
           </div>
         </div>
 
-      {/* 4. 右侧多功能面板 - 移除 sticky，改用容器内高度铺满 */}
+      {/* 4. 右侧多功能面板 + 拖拽分割线 */}
       {showAdminAudit && (
-        <div className="flex-1 min-w-[600px] h-full flex flex-col animate-in slide-in-from-right-10 duration-500 print:hidden overflow-hidden">
+        <>
+          {/* 可拖拽分割线 */}
+          <div
+            onMouseDown={handleRightDragStart}
+            className="w-[5px] shrink-0 cursor-col-resize bg-slate-200 hover:bg-blue-400 active:bg-blue-500 transition-colors relative group z-10"
+            title="拖拽调整宽度"
+          >
+            <div className="absolute inset-y-0 -left-1 -right-1" />
+            <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-1 h-8 rounded-full bg-slate-400 group-hover:bg-white transition-colors" />
+          </div>
+          <div style={{ width: `${rightPanelPct}%` }} className="shrink-0 h-full flex flex-col animate-in slide-in-from-right-10 duration-500 print:hidden overflow-hidden">
           <div className={`bg-white rounded-2xl border-2 shadow-2xl overflow-hidden flex flex-col h-full flex-1 ${rightPanelTab === 'audit' ? 'border-orange-200' : 'border-blue-200'}`}>
             
             {/* 动态 Header */}
@@ -1717,21 +1899,72 @@ const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, on
                     </div>
                   </div>
 
-                  {/* 逐字稿内容区 - 填满并独立滚动 */}
+                  {/* 逐字稿内容区 - 填满并独立滚动 + 选文字定位视频 */}
                   <div className="flex-1 relative flex overflow-hidden h-full">
                     <div 
                       ref={transcriptRef}
                       onScroll={handleTranscriptScroll}
                       className="flex-1 overflow-y-auto p-8 font-mono text-sm leading-[1.8] text-slate-600 whitespace-pre-wrap selection:bg-blue-200 selection:text-blue-900 scroll-smooth bg-white h-full"
+                      onMouseUp={(e) => {
+                        const sel = window.getSelection();
+                        const text = sel?.toString().trim();
+                        if (text && text.length >= 3) {
+                          const range = sel?.getRangeAt(0);
+                          if (range) {
+                            const rect = range.getBoundingClientRect();
+                            setSelectionPopup({
+                              text,
+                              x: rect.left + rect.width / 2,
+                              y: rect.top - 44
+                            });
+                          }
+                        } else {
+                          setSelectionPopup(null);
+                        }
+                      }}
                     >
                        {renderHighlightedTranscript()}
                     </div>
+
+                    {/* 选中文字后弹出「定位视频」按钮 */}
+                    {selectionPopup && (
+                      <div
+                        className="fixed z-[9999] animate-in fade-in duration-150"
+                        style={{
+                          left: `${selectionPopup.x}px`,
+                          top: `${selectionPopup.y}px`,
+                          transform: 'translateX(-50%)'
+                        }}
+                      >
+                        <button
+                          onMouseDown={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            const fn = (window as any).__reportVideoFindText;
+                            if (fn) {
+                              const found = fn(selectionPopup.text);
+                              if (!found) {
+                                alert('未找到匹配的视频片段，请尝试选中更长的文字');
+                              }
+                            } else {
+                              alert('请先点击顶部「显示回放」按钮打开视频面板');
+                            }
+                            setSelectionPopup(null);
+                            window.getSelection()?.removeAllRanges();
+                          }}
+                          className="flex items-center gap-1.5 px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-lg shadow-2xl transition-colors whitespace-nowrap border border-blue-400"
+                        >
+                          <MapPin size={12} /> 定位视频
+                        </button>
+                        <div className="w-3 h-3 bg-blue-600 rotate-45 mx-auto -mt-1.5 border-r border-b border-blue-400" />
+                      </div>
+                    )}
 
                     {/* 右侧热力进度条 */}
                     <div className="w-2.5 bg-slate-50 border-l border-slate-100 relative shrink-0 z-10">
                       {/* 搜索结果热力图 */}
                       {searchMatches.map((pos, i) => {
-                        const fullText = activeRound === 'round1' ? localResult.round1Text : (localResult.round2Text || localResult.round1Text);
+                        const fullText = asrFullText || (activeRound === 'round1' ? localResult.round1Text : (localResult.round2Text || localResult.round1Text));
                         const top = (pos / fullText.length) * 100;
                         return (
                           <div 
@@ -1753,7 +1986,8 @@ const ReportView: React.FC<ReportViewProps> = ({ result, standards, metadata, on
               )}
             </div>
           </div>
-        </div>
+          </div>
+        </>
       )}
       </div>
       

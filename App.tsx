@@ -89,6 +89,9 @@ const App: React.FC = () => {
       const data = await response.json();
       if (data.success) {
         localStorage.setItem('qc_logged_in', '1');
+        localStorage.setItem('qc_role', data.role || 'admin');
+        localStorage.setItem('qc_display_name', data.display_name || '管理员');
+        localStorage.setItem('qc_username', data.username || u);
         setAppPage('home');
       } else {
         setError(data.error || "账号或密码错误");

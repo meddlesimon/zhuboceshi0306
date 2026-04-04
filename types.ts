@@ -101,6 +101,9 @@ export interface Anchor {
   id: number;
   name: string;
   created_at: string;
+  enable_qc: boolean;              // 是否开启质检（内部主播=true，外部跟踪主播=false）
+  douyin_profile_url: string;      // 抖音主页链接
+  douyin_room_url: string;         // 直播间链接
 }
 
 export interface StandardsVersion {

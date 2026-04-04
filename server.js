@@ -5,6 +5,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
+import crypto from 'crypto';
 
 dotenv.config();
 
@@ -28,15 +29,100 @@ const DEFAULT_GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite-
 const DEFAULT_GEMINI_URL = process.env.GEMINI_URL || 'https://cn2us02.opapi.win/v1/chat/completions';
 
 const ADMIN_USER = process.env.ADMIN_USER || '18611979493';
-const ADMIN_PWD = process.env.ADMIN_PWD || '20250901';
+const ADMIN_PWD = process.env.ADMIN_PWD || '230101';
+
+// 初始化管理员账号
+function ensureAdminAccounts() {
+  const db = loadDB();
+  if (!db.admin_accounts) db.admin_accounts = [];
+  // 确保超级管理员存在
+  const superAdmin = db.admin_accounts.find(a => a.username === '18611979493');
+  if (!superAdmin) {
+    db.admin_accounts.push({
+      id: 'admin_super',
+      username: '18611979493',
+      password: '230101',
+      display_name: '超级管理员',
+      role: 'super_admin',
+      created_at: new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })
+    });
+  }
+  // 确保第一个普通管理员存在
+  const firstAdmin = db.admin_accounts.find(a => a.username === 'zhanghaohui');
+  if (!firstAdmin) {
+    db.admin_accounts.push({
+      id: 'admin_' + Date.now(),
+      username: 'zhanghaohui',
+      password: '888888',
+      display_name: '张浩辉',
+      role: 'admin',
+      created_at: new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })
+    });
+  }
+  saveDB(db);
+}
 
 app.post('/api/login', (req, res) => {
   const { username, password } = req.body;
-  if (username === ADMIN_USER && password === ADMIN_PWD) {
-    res.json({ success: true });
+  const db = loadDB();
+  if (!db.admin_accounts) db.admin_accounts = [];
+  const account = db.admin_accounts.find(a => a.username === username && a.password === password);
+  if (account) {
+    res.json({ success: true, role: account.role, display_name: account.display_name, username: account.username });
   } else {
     res.status(401).json({ success: false, error: '账号或密码错误' });
   }
+});
+
+// 管理员列表（仅超级管理员可用）
+app.get('/api/admin/accounts', (req, res) => {
+  const db = loadDB();
+  const accounts = (db.admin_accounts || []).map(a => ({
+    id: a.id, username: a.username, display_name: a.display_name, role: a.role, created_at: a.created_at
+  }));
+  res.json(accounts);
+});
+
+// 添加管理员
+app.post('/api/admin/accounts', (req, res) => {
+  const { username, password, display_name } = req.body;
+  if (!username || !password || !display_name) return res.status(400).json({ error: '账号、密码、显示名不能为空' });
+  const db = loadDB();
+  if (!db.admin_accounts) db.admin_accounts = [];
+  if (db.admin_accounts.find(a => a.username === username)) return res.status(409).json({ error: '该账号已存在' });
+  const account = {
+    id: 'admin_' + Date.now(),
+    username, password, display_name,
+    role: 'admin',
+    created_at: new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })
+  };
+  db.admin_accounts.push(account);
+  saveDB(db);
+  res.json({ success: true, id: account.id });
+});
+
+// 删除管理员（不能删超级管理员）
+app.delete('/api/admin/accounts/:id', (req, res) => {
+  const db = loadDB();
+  if (!db.admin_accounts) return res.status(404).json({ error: '账号不存在' });
+  const idx = db.admin_accounts.findIndex(a => a.id === req.params.id);
+  if (idx < 0) return res.status(404).json({ error: '账号不存在' });
+  if (db.admin_accounts[idx].role === 'super_admin') return res.status(403).json({ error: '不能删除超级管理员' });
+  db.admin_accounts.splice(idx, 1);
+  saveDB(db);
+  res.json({ success: true });
+});
+
+// 重置密码
+app.put('/api/admin/accounts/:id/password', (req, res) => {
+  const { password } = req.body;
+  if (!password) return res.status(400).json({ error: '密码不能为空' });
+  const db = loadDB();
+  const account = (db.admin_accounts || []).find(a => a.id === req.params.id);
+  if (!account) return res.status(404).json({ error: '账号不存在' });
+  account.password = password;
+  saveDB(db);
+  res.json({ success: true });
 });
 
 // 辅助函数：安全解析 JSON（防止 AI 返回 Markdown 代码块）
@@ -496,6 +582,94 @@ app.post('/api/check-standards-batch', async (req, res) => {
 const PORT = process.env.PORT || 3001;
 
 // ============================================================
+// 直播监控系统代理 API（转发到 Python FastAPI 后端 8089）
+// ============================================================
+
+const MONITOR_API = process.env.MONITOR_API || 'http://127.0.0.1:8089';
+
+// 为监控后端生成内部访问 token（共享密钥，无需密码）
+const MONITOR_JWT_SECRET = 'zhibojiankong-secret-key-2026';
+function getMonitorToken() {
+  // 手动构造一个简单的 JWT（HS256），有效期 24 小时
+  const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const now = Math.floor(Date.now() / 1000);
+  const payload = Buffer.from(JSON.stringify({
+    sub: '18611979493',
+    role: 'super_admin',
+    exp: now + 86400
+  })).toString('base64url');
+  const signature = crypto.createHmac('sha256', MONITOR_JWT_SECRET)
+    .update(`${header}.${payload}`)
+    .digest('base64url');
+  return `${header}.${payload}.${signature}`;
+}
+
+// 代理工具函数：转发请求到监控后端（自动携带 token）
+async function proxyMonitor(path, res) {
+  try {
+    const token = getMonitorToken();
+    const sep = path.includes('?') ? '&' : '?';
+    const resp = await axios.get(`${MONITOR_API}${path}${sep}token=${token}`, { timeout: 15000 });
+    res.json(resp.data);
+  } catch (e) {
+    const status = e.response?.status || 502;
+    const msg = e.response?.data?.detail || e.message || '监控服务连接失败';
+    res.status(status).json({ error: msg });
+  }
+}
+
+// 获取某个主播的所有直播场次（从监控系统的 anchor 表关联查询）
+app.get('/api/monitor/sessions/:anchorName', async (req, res) => {
+  const anchorName = decodeURIComponent(req.params.anchorName);
+  try {
+    const token = getMonitorToken();
+    // 先从监控系统查找匹配的主播
+    const anchorsResp = await axios.get(`${MONITOR_API}/api/anchors?token=${token}`, { timeout: 10000 });
+    const monitorAnchor = anchorsResp.data.find(
+      (a) => a.name === anchorName || a.name.includes(anchorName) || anchorName.includes(a.name)
+    );
+    if (!monitorAnchor) {
+      return res.json([]);  // 监控系统中没有这个主播，返回空数组
+    }
+    // 拉取该主播的场次列表
+    const sessionsResp = await axios.get(`${MONITOR_API}/api/sessions/${monitorAnchor.id}?token=${token}`, { timeout: 10000 });
+    res.json(sessionsResp.data);
+  } catch (e) {
+    if (e.code === 'ECONNREFUSED') {
+      return res.json([]);  // 监控服务未启动时静默返回空
+    }
+    res.status(502).json({ error: '监控服务连接失败: ' + e.message });
+  }
+});
+
+// 获取某个场次的详情（含 video_cos_url + timestamped_text）
+app.get('/api/monitor/session/:sessionId', async (req, res) => {
+  await proxyMonitor(`/api/session/${req.params.sessionId}`, res);
+});
+
+// 获取某个场次的评论
+app.get('/api/monitor/comments/:sessionId', async (req, res) => {
+  const { start, end } = req.query;
+  await proxyMonitor(`/api/comments/${req.params.sessionId}?start=${start || 0}&end=${end || 99999}`, res);
+});
+
+// 获取某个场次的在线人数
+app.get('/api/monitor/online-count/:sessionId', async (req, res) => {
+  await proxyMonitor(`/api/online-count/${req.params.sessionId}`, res);
+});
+
+// 监控系统健康检查
+app.get('/api/monitor/health', async (req, res) => {
+  try {
+    const token = getMonitorToken();
+    await axios.get(`${MONITOR_API}/api/anchors?token=${token}`, { timeout: 5000 });
+    res.json({ status: 'connected', monitor_api: MONITOR_API });
+  } catch (e) {
+    res.json({ status: 'disconnected', error: e.message, monitor_api: MONITOR_API });
+  }
+});
+
+// ============================================================
 // API：模型配置管理
 // ============================================================
 
@@ -856,14 +1030,40 @@ app.get('/api/anchors', (req, res) => {
 
 // 新增主播
 app.post('/api/anchors', (req, res) => {
-  const { name } = req.body;
+  const { name, enable_qc, douyin_profile_url, douyin_room_url } = req.body;
   if (!name || !name.trim()) return res.status(400).json({ error: '主播名不能为空' });
   try {
     const db = loadDB();
     const trimmed = name.trim();
     if (db.anchors.find(a => a.name === trimmed)) return res.status(409).json({ error: '该主播已存在' });
-    const anchor = { id: db._next_anchor_id++, name: trimmed, created_at: new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) };
+    const anchor = {
+      id: db._next_anchor_id++,
+      name: trimmed,
+      enable_qc: enable_qc !== false,  // 默认开启质检
+      douyin_profile_url: (douyin_profile_url || '').trim(),
+      douyin_room_url: (douyin_room_url || '').trim(),
+      created_at: new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })
+    };
     db.anchors.push(anchor);
+    saveDB(db);
+    res.json(anchor);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 编辑主播（新增：支持更新名称、质检开关、抖音链接）
+app.put('/api/anchors/:id', (req, res) => {
+  const id = parseInt(req.params.id);
+  const { name, enable_qc, douyin_profile_url, douyin_room_url } = req.body;
+  try {
+    const db = loadDB();
+    const anchor = db.anchors.find(a => a.id === id);
+    if (!anchor) return res.status(404).json({ error: '主播不存在' });
+    if (name !== undefined) anchor.name = name.trim();
+    if (enable_qc !== undefined) anchor.enable_qc = !!enable_qc;
+    if (douyin_profile_url !== undefined) anchor.douyin_profile_url = douyin_profile_url.trim();
+    if (douyin_room_url !== undefined) anchor.douyin_room_url = douyin_room_url.trim();
     saveDB(db);
     res.json(anchor);
   } catch (e) {
@@ -1071,6 +1271,209 @@ app.post('/api/tasks', async (req, res) => {
   runTaskInBackground(taskId, stdVer, transcript_text, isDual, manual_anchors || null).catch(e => {
     console.error('[Task Background Error]', taskId, e.message);
   });
+});
+
+// ============================================================
+// Webhook：监控系统 ASR 完成后自动触发质检
+// Python 端在 ASR 完成后 POST 到此接口
+// ============================================================
+app.post('/api/webhook/asr-complete', async (req, res) => {
+  const { anchor_name, session_id, transcript_text, session_title, duration_seconds } = req.body;
+  console.log(`[Webhook/ASR] 收到 ASR 完成通知: anchor=${anchor_name}, session=${session_id}, text_len=${(transcript_text||'').length}, duration=${duration_seconds}s`);
+
+  if (!anchor_name || !transcript_text || transcript_text.length < 50) {
+    return res.status(400).json({ error: '缺少必要字段或转录文本过短' });
+  }
+
+  try {
+    const db = loadDB();
+
+    // 1. 查找质检系统中匹配的主播
+    const anchor = db.anchors.find(a =>
+      a.name === anchor_name || a.name.includes(anchor_name) || anchor_name.includes(a.name)
+    );
+    if (!anchor) {
+      console.log(`[Webhook/ASR] 未找到匹配主播: ${anchor_name}, 跳过质检`);
+      return res.json({ skipped: true, reason: '质检系统中无此主播' });
+    }
+
+    // 2. 检查主播是否开启质检
+    if (anchor.enable_qc === false) {
+      console.log(`[Webhook/ASR] 主播 ${anchor.name} 未开启质检，跳过`);
+      return res.json({ skipped: true, reason: '主播未开启质检' });
+    }
+
+    // 3. 获取当前话术版本
+    const stdVer = db.standards_versions.filter(v => v.is_current === 1).sort((a, b) => b.id - a.id)[0];
+    if (!stdVer) {
+      console.log('[Webhook/ASR] 尚未配置话术，跳过质检');
+      return res.json({ skipped: true, reason: '尚未配置话术' });
+    }
+
+    // 4. 检查是否已有针对此 session 的任务（避免重复）
+    const existingTask = db.tasks.find(t =>
+      t.anchor_id === anchor.id &&
+      (t.monitor_session_id === session_id || t.monitor_session_id === parseInt(session_id) ||
+       t.transcript_filename === `直播自动录制-${session_id}`)
+    );
+    if (existingTask) {
+      console.log(`[Webhook/ASR] session ${session_id} 已存在质检任务 ${existingTask.id}，跳过`);
+      return res.json({ skipped: true, reason: '已存在对应质检任务', task_id: existingTask.id });
+    }
+
+    // 5. 根据直播时长判断单轮/双轮
+    //    ≤2.5小时(9000秒) = 单轮，>2.5小时 = 双轮
+    const dur = parseInt(duration_seconds) || 0;
+    const isDual = dur > 9000;
+    console.log(`[Webhook/ASR] 时长=${dur}s, 模式=${isDual ? '双轮' : '单轮'}`);
+
+    const taskId = genTaskId();
+    const now = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+
+    // 从监控系统获取开播时间
+    let liveStartTime = now;
+    let transcriptFilename = `${anchor_name}`;
+    try {
+      const token = getMonitorToken();
+      const sRes = await axios.get(`${MONITOR_API}/api/session/${session_id}?token=${token}`, { timeout: 10000 });
+      const sCreated = sRes.data.created_at; // UTC 时间如 '2026-04-04 07:00:12'
+      if (sCreated) {
+        const utcDate = new Date(sCreated.trim().replace(' ', 'T') + 'Z');
+        const m = utcDate.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', month: 'numeric', day: 'numeric' });
+        const t = utcDate.toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hour12: false });
+        liveStartTime = `${m} ${t}`;
+        transcriptFilename = `${m} ${t} ${anchor_name}`;
+      }
+    } catch (e) { console.log('[Webhook] 获取开播时间失败:', e.message); }
+
+    const task = {
+      id: taskId,
+      anchor_id: anchor.id,
+      anchor_name: anchor.name,
+      standards_version_id: stdVer.id,
+      standards_version_label: stdVer.version_label,
+      status: 'pending',
+      transcript_filename: transcriptFilename,
+      score_r1: null,
+      score_r2: null,
+      is_dual_mode: isDual ? 1 : 0,
+      progress_message: '由直播监控自动触发...',
+      created_at: now,
+      completed_at: null,
+      error_message: null,
+      source: 'auto_asr',
+      monitor_session_id: session_id,
+      live_start_time: liveStartTime
+    };
+    db.tasks.push(task);
+    saveDB(db);
+
+    console.log(`[Webhook/ASR] ✅ 自动创建质检任务: ${taskId}, 主播=${anchor.name}, session=${session_id}, ${isDual ? '双轮' : '单轮'}`);
+
+    // 7. 后台运行质检
+    runTaskInBackground(taskId, stdVer, transcript_text, isDual, null).catch(e => {
+      console.error('[Webhook/ASR] 后台质检出错:', taskId, e.message);
+    });
+
+    res.json({ success: true, task_id: taskId, anchor_name: anchor.name, is_dual: isDual });
+  } catch (e) {
+    console.error('[Webhook/ASR] 错误:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ============================================================
+// 手动触发质检：从监控系统拉取指定场次的完整转录，重新质检
+// 前端调用此接口为历史场次补做质检
+// ============================================================
+app.post('/api/webhook/trigger-qc', async (req, res) => {
+  const { anchor_id, session_id } = req.body;
+  if (!anchor_id || !session_id) {
+    return res.status(400).json({ error: 'anchor_id 和 session_id 为必填项' });
+  }
+
+  try {
+    const db = loadDB();
+    const anchor = db.anchors.find(a => a.id === parseInt(anchor_id));
+    if (!anchor) return res.status(404).json({ error: '主播不存在' });
+
+    const stdVer = db.standards_versions.filter(v => v.is_current === 1).sort((a, b) => b.id - a.id)[0];
+    if (!stdVer) return res.status(400).json({ error: '尚未配置话术' });
+
+    // 从监控系统拉取场次详情（含完整转录文本）
+    const token = getMonitorToken();
+    const sessionRes = await axios.get(`${MONITOR_API}/api/session/${session_id}?token=${token}`, { timeout: 30000 });
+    const sessionData = sessionRes.data;
+
+    const transcriptText = sessionData.transcript?.full_text || '';
+    if (transcriptText.length < 50) {
+      return res.status(400).json({ error: '该场次的转录文本过短或不可用' });
+    }
+
+    // 删除旧的同 session 任务（如果有）
+    const oldIdx = db.tasks.findIndex(t =>
+      t.anchor_id === anchor.id &&
+      t.transcript_filename === `直播自动录制-${session_id}`
+    );
+    if (oldIdx >= 0) {
+      console.log(`[Trigger-QC] 删除旧任务: ${db.tasks[oldIdx].id}`);
+      db.tasks.splice(oldIdx, 1);
+    }
+
+    // 根据时长判断单/双轮
+    const dur = sessionData.duration_seconds || 0;
+    const isDual = dur > 9000;
+
+    const taskId = genTaskId();
+    const now = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+
+    // 从监控数据获取开播时间
+    let liveStartTime = now;
+    let transcriptFilename = `${anchor.name}`;
+    const sCreated = sessionData.created_at;
+    if (sCreated) {
+      try {
+        const utcDate = new Date(sCreated.trim().replace(' ', 'T') + 'Z');
+        const m = utcDate.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', month: 'numeric', day: 'numeric' });
+        const t = utcDate.toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hour12: false });
+        liveStartTime = `${m} ${t}`;
+        transcriptFilename = `${m} ${t} ${anchor.name}`;
+      } catch (e) { console.log('[Trigger-QC] 解析开播时间失败:', e.message); }
+    }
+
+    const task = {
+      id: taskId,
+      anchor_id: anchor.id,
+      anchor_name: anchor.name,
+      standards_version_id: stdVer.id,
+      standards_version_label: stdVer.version_label,
+      status: 'pending',
+      transcript_filename: transcriptFilename,
+      score_r1: null,
+      score_r2: null,
+      is_dual_mode: isDual ? 1 : 0,
+      progress_message: '手动触发质检...',
+      created_at: now,
+      completed_at: null,
+      error_message: null,
+      source: 'auto_asr',
+      monitor_session_id: parseInt(session_id),
+      live_start_time: liveStartTime
+    };
+    db.tasks.push(task);
+    saveDB(db);
+
+    console.log(`[Trigger-QC] ✅ 创建质检: ${taskId}, 主播=${anchor.name}, session=${session_id}, ${isDual ? '双轮' : '单轮'}, text=${transcriptText.length}字`);
+
+    runTaskInBackground(taskId, stdVer, transcriptText, isDual, null).catch(e => {
+      console.error('[Trigger-QC] 后台质检出错:', taskId, e.message);
+    });
+
+    res.json({ success: true, task_id: taskId, text_length: transcriptText.length, is_dual: isDual });
+  } catch (e) {
+    console.error('[Trigger-QC] 错误:', e.message);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // 更新任务状态的辅助函数
@@ -1622,5 +2025,6 @@ app.get('*', (req, res) => {
 });
 
 app.listen(PORT, '0.0.0.0', () => {
+  ensureAdminAccounts();
   console.log(`Server is running at http://0.0.0.0:${PORT}`);
 });

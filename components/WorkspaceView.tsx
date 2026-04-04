@@ -5,9 +5,12 @@ import { findCandidateAnchors } from '../services/doubaoService';
 import ReportView from './ReportView';
 import AnchorVerification from './AnchorVerification';
 import FileUploader from './FileUploader';
+import SessionListView from './SessionListView';
+import ReportVideoPanel from './ReportVideoPanel';
 import {
   ArrowLeft, Plus, FileText, Loader2, AlertTriangle, CheckCircle2,
-  Clock, TrendingUp, Split, ChevronUp, ChevronDown, RefreshCw, Mic
+  Clock, TrendingUp, Split, ChevronUp, ChevronDown, RefreshCw, Mic,
+  Video, Shield, Eye
 } from 'lucide-react';
 
 interface Props {
@@ -16,8 +19,13 @@ interface Props {
 }
 
 type PanelMode = 'list' | 'new-check' | 'verify-anchors' | 'analyzing' | 'report';
+type WorkspaceTab = 'replay' | 'qc';
 
 const WorkspaceView: React.FC<Props> = ({ anchor, onBack }) => {
+  // Tab 切换：外部主播默认只有"全场回看"，内部主播默认也先看"全场回看"
+  const [activeTab, setActiveTab] = useState<WorkspaceTab>('replay');
+  const enableQc = anchor.enable_qc !== false;
+
   const [panelMode, setPanelMode] = useState<PanelMode>('list');
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loadingTasks, setLoadingTasks] = useState(true);
@@ -40,6 +48,11 @@ const WorkspaceView: React.FC<Props> = ({ anchor, onBack }) => {
   const [viewingReport, setViewingReport] = useState<{ result: MultiRoundResult; standards: Standard[]; metadata: StreamMetadata } | null>(null);
   const [headerActions, setHeaderActions] = useState<React.ReactNode>(null);
 
+  // 视频面板相关
+  const [reportVideoUrl, setReportVideoUrl] = useState<string | null>(null);
+  const [reportVideoSegments, setReportVideoSegments] = useState<any[]>([]);
+  const [showVideoPanel, setShowVideoPanel] = useState(false);
+
   // 排序
   const [sortBy, setSortBy] = useState<'created_at' | 'score_r1'>('created_at');
   const [sortDir, setSortDir] = useState<'desc' | 'asc'>('desc');
@@ -47,8 +60,10 @@ const WorkspaceView: React.FC<Props> = ({ anchor, onBack }) => {
   const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
-    loadTasks();
-    checkStandards();
+    if (enableQc) {
+      loadTasks();
+      checkStandards();
+    }
   }, [anchor.id]);
 
   useEffect(() => {
@@ -69,7 +84,6 @@ const WorkspaceView: React.FC<Props> = ({ anchor, onBack }) => {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || '加载失败');
       setTasks(data);
-      // 如果有进行中任务，开始轮询
       const running = data.find((t: Task) => t.status === 'pending' || t.status === 'running');
       if (running) startPolling(running.id);
     } catch (e: any) {
@@ -87,9 +101,8 @@ const WorkspaceView: React.FC<Props> = ({ anchor, onBack }) => {
         const task = await res.json();
         if (task.status === 'completed' || task.status === 'failed') {
           clearInterval(pollTimer.current!);
-          loadTasks(); // 刷新列表
+          loadTasks();
         } else {
-          // 更新进度
           setTasks(prev => prev.map(t => t.id === taskId ? { ...t, status: task.status, progress_message: task.progress_message } : t));
         }
       } catch {}
@@ -112,10 +125,8 @@ const WorkspaceView: React.FC<Props> = ({ anchor, onBack }) => {
     }
   };
 
-  // 直接进入手动选择锚点界面（不再调用 AI 预扫）
   const startScanningAnchors = () => {
     setError(null);
-    // 构造全空的锚点，让运营人员手动选择
     setCandidateAnchors({
       r1StartPhrase: null, r1StartPos: -1,
       r1EndPhrase: null, r1EndPos: -1,
@@ -147,7 +158,6 @@ const WorkspaceView: React.FC<Props> = ({ anchor, onBack }) => {
       setCurrentTaskStatus('pending');
       setCurrentTaskProgress('任务已提交，后台处理中...');
 
-      // 添加到任务列表
       const newTask: Task = {
         id: data.task_id,
         anchor_id: anchor.id,
@@ -164,8 +174,6 @@ const WorkspaceView: React.FC<Props> = ({ anchor, onBack }) => {
         error_message: null
       };
       setTasks(prev => [newTask, ...prev]);
-
-      // 开始轮询
       startPollingWithState(data.task_id);
     } catch (e: any) {
       setError(`提交失败: ${e.message}`);
@@ -214,9 +222,92 @@ const WorkspaceView: React.FC<Props> = ({ anchor, onBack }) => {
         }
       });
       setPanelMode('report');
+
+      // 异步查找对应的直播视频（不阻塞报告展示）
+      setReportVideoUrl(null);
+      setReportVideoSegments([]);
+      setShowVideoPanel(false);
+      try {
+        const monitorSessionId = (task as any).monitor_session_id;
+        if (monitorSessionId) {
+          // 有 monitor_session_id：精确拉取对应场次
+          const detailRes = await fetch(`/api/monitor/session/${monitorSessionId}`);
+          const detail = await detailRes.json();
+          if (detail.video_cos_url) {
+            setReportVideoUrl(detail.video_cos_url);
+            setShowVideoPanel(true);
+          }
+          if (detail.transcript?.timestamped_text) {
+            const parsed = parseTimestampedSegments(detail.transcript.timestamped_text);
+            setReportVideoSegments(parsed);
+          }
+        } else {
+          // 无 monitor_session_id（手动上传任务）：找最近的有视频的场次
+          const sessRes = await fetch(`/api/monitor/sessions/${encodeURIComponent(anchor.name)}`);
+          const sessions = await sessRes.json();
+          if (Array.isArray(sessions) && sessions.length > 0) {
+            const withVideo = sessions.find((s: any) => s.video_cos_url);
+            if (withVideo) {
+              setReportVideoUrl(withVideo.video_cos_url);
+              try {
+                const detailRes = await fetch(`/api/monitor/session/${withVideo.id}`);
+                const detail = await detailRes.json();
+                if (detail.transcript?.timestamped_text) {
+                  const parsed = parseTimestampedSegments(detail.transcript.timestamped_text);
+                  setReportVideoSegments(parsed);
+                }
+              } catch {}
+              setShowVideoPanel(true);
+            }
+          }
+        }
+      } catch {}
     } catch (e: any) {
       setError('加载报告失败: ' + e.message);
     }
+  };
+
+  // 解析带时间戳的逐字稿（对长句按标点拆分，提升搜索精度）
+  const parseTimestampedSegments = (jsonStr: string) => {
+    try {
+      const parsed = JSON.parse(jsonStr);
+      if (!Array.isArray(parsed)) return [];
+      const toSec = (v: number) => (v || 0) / 1000;
+      const raw = parsed.map((s: any) => ({
+        start: toSec(s.start_time != null ? s.start_time : s.start),
+        end: toSec(s.end_time != null ? s.end_time : s.end),
+        text: (s.text || s.content || '').trim()
+      })).filter((s: any) => s.text);
+
+      // 对超过 10 秒的长句按标点拆分
+      const result: any[] = [];
+      for (const seg of raw) {
+        const duration = seg.end - seg.start;
+        if (duration <= 10 || seg.text.length <= 30) {
+          result.push(seg);
+          continue;
+        }
+        // 按标点拆分
+        const parts = seg.text.split(/(?<=[。！？，,；、])/g).filter((p: string) => p.trim());
+        if (parts.length <= 1) {
+          result.push(seg);
+          continue;
+        }
+        let charOffset = 0;
+        const totalChars = seg.text.length;
+        for (const part of parts) {
+          const ratio = charOffset / totalChars;
+          const endRatio = (charOffset + part.length) / totalChars;
+          result.push({
+            start: seg.start + ratio * duration,
+            end: seg.start + endRatio * duration,
+            text: part.trim()
+          });
+          charOffset += part.length;
+        }
+      }
+      return result;
+    } catch { return []; }
   };
 
   const resetNewCheck = () => {
@@ -263,31 +354,104 @@ const WorkspaceView: React.FC<Props> = ({ anchor, onBack }) => {
     return 'text-red-600 font-black';
   };
 
-  // 如果是查看报告模式
+  // ====== 报告模式 ======
+  // 可拖拽分割线状态
+  const [videoPanelWidth, setVideoPanelWidth] = useState(() => {
+    try { return parseFloat(localStorage.getItem('qc_video_width') || '33') || 33; } catch { return 33; }
+  });
+  const isDraggingRef = useRef(false);
+  const dragContainerRef = useRef<HTMLDivElement>(null);
+
+  // 拖拽处理
+  const handleDragStart = (e: React.MouseEvent) => {
+    e.preventDefault();
+    isDraggingRef.current = true;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+
+    const onMove = (ev: MouseEvent) => {
+      if (!isDraggingRef.current || !dragContainerRef.current) return;
+      const rect = dragContainerRef.current.getBoundingClientRect();
+      const pct = ((ev.clientX - rect.left) / rect.width) * 100;
+      const clamped = Math.min(Math.max(pct, 20), 50); // 最小20%，最大50%
+      setVideoPanelWidth(clamped);
+    };
+    const onUp = () => {
+      isDraggingRef.current = false;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      // 保存到 localStorage
+      setVideoPanelWidth(w => { try { localStorage.setItem('qc_video_width', String(w)); } catch {} return w; });
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  };
+
   if (panelMode === 'report' && viewingReport) {
     return (
-      <div className="min-h-screen bg-white">
-        <div className="bg-white border-b border-slate-100 px-6 py-3 flex items-center gap-3 shadow-sm print:hidden">
-          <button onClick={() => { setPanelMode('list'); setViewingReport(null); }} className="flex items-center gap-2 text-sm text-slate-500 hover:text-slate-700 font-bold transition-colors">
+      <div className="h-screen bg-white flex flex-col overflow-hidden">
+        <div className="bg-white border-b border-slate-100 px-4 py-2 flex items-center gap-3 shadow-sm print:hidden shrink-0 z-10">
+          <button onClick={() => { setPanelMode('list'); setViewingReport(null); setShowVideoPanel(false); }} className="flex items-center gap-2 text-sm text-slate-500 hover:text-slate-700 font-bold transition-colors">
             <ArrowLeft size={16} />
-            返回工作台
+            返回
           </button>
           <span className="text-slate-300">|</span>
           <span className="text-sm font-black text-slate-700">{anchor.name} · 质检报告</span>
+          {reportVideoUrl && (
+            <button
+              onClick={() => setShowVideoPanel(v => !v)}
+              className={`ml-2 flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg transition-all ${
+                showVideoPanel ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-500 hover:text-blue-600'
+              }`}
+            >
+              <Video size={13} />
+              {showVideoPanel ? '隐藏回放' : '显示回放'}
+            </button>
+          )}
           {headerActions}
         </div>
-        <ReportView
-          result={viewingReport.result}
-          standards={viewingReport.standards}
-          metadata={viewingReport.metadata}
-          onReset={() => { setPanelMode('list'); setViewingReport(null); }}
-          onRegisterActions={setHeaderActions}
-        />
+        {/* 三栏布局 + 可拖拽分割线 */}
+        <div ref={dragContainerRef} className="flex flex-1 min-h-0 overflow-hidden">
+          {/* 左侧视频面板 */}
+          {showVideoPanel && reportVideoUrl && (
+            <>
+              <div style={{ width: `${videoPanelWidth}%` }} className="shrink-0 h-full">
+                <ReportVideoPanel
+                  videoUrl={reportVideoUrl}
+                  segments={reportVideoSegments}
+                  onClose={() => setShowVideoPanel(false)}
+                />
+              </div>
+              {/* 可拖拽分割线 */}
+              <div
+                onMouseDown={handleDragStart}
+                className="w-[5px] shrink-0 cursor-col-resize bg-slate-200 hover:bg-blue-400 active:bg-blue-500 transition-colors relative group"
+                title="拖拽调整宽度"
+              >
+                <div className="absolute inset-y-0 -left-1 -right-1" /> {/* 扩大点击区域 */}
+                <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-1 h-8 rounded-full bg-slate-400 group-hover:bg-white transition-colors" />
+              </div>
+            </>
+          )}
+          {/* 中间+右侧（ReportView 内部管理右侧核对台） */}
+          <div className="flex-1 overflow-hidden min-w-0">
+            <ReportView
+              result={viewingReport.result}
+              standards={viewingReport.standards}
+              metadata={viewingReport.metadata}
+              onReset={() => { setPanelMode('list'); setViewingReport(null); setShowVideoPanel(false); }}
+              onRegisterActions={setHeaderActions}
+              videoSegments={reportVideoSegments}
+            />
+          </div>
+        </div>
       </div>
     );
   }
 
-  // 核对锚点模式（复用原有组件）
+  // ====== 锚点核对模式 ======
   if (panelMode === 'verify-anchors' && candidateAnchors) {
     return (
       <div className="h-screen flex flex-col bg-slate-50 overflow-hidden">
@@ -310,7 +474,7 @@ const WorkspaceView: React.FC<Props> = ({ anchor, onBack }) => {
     );
   }
 
-  // 分析中模式
+  // ====== 分析中 ======
   if (panelMode === 'analyzing') {
     const isDone = currentTaskStatus === 'completed' || currentTaskStatus === 'failed';
     return (
@@ -339,35 +503,28 @@ const WorkspaceView: React.FC<Props> = ({ anchor, onBack }) => {
               </div>
             )}
           </div>
-
           <div className="flex gap-3">
             {isDone && currentTaskStatus === 'completed' && currentTaskId && (
               <button
-                onClick={() => {
-                  const task = tasks.find(t => t.id === currentTaskId);
-                  if (task) viewTaskReport(task);
-                }}
+                onClick={() => { const task = tasks.find(t => t.id === currentTaskId); if (task) viewTaskReport(task); }}
                 className="flex-1 py-3 bg-blue-600 hover:bg-blue-700 text-white font-bold text-sm rounded-xl shadow-md transition-all"
-              >
-                查看报告
-              </button>
+              >查看报告</button>
             )}
             <button
               onClick={() => { setPanelMode('list'); resetNewCheck(); }}
               className="flex-1 py-3 border border-slate-200 text-slate-600 font-bold text-sm rounded-xl hover:bg-slate-50 transition-all"
-            >
-              返回工作台
-            </button>
+            >返回工作台</button>
           </div>
         </div>
       </div>
     );
   }
 
+  // ====== 主界面（带 Tab 切换）======
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col">
-      {/* Header */}
-      <div className="bg-white border-b border-slate-100 px-6 py-4 flex items-center gap-4 shadow-sm shrink-0">
+      {/* Header — 只放主播信息 */}
+      <div className="bg-white border-b border-slate-100 px-6 py-3 flex items-center gap-4 shrink-0">
         <button onClick={onBack} className="w-9 h-9 flex items-center justify-center rounded-xl hover:bg-slate-100 transition-colors">
           <ArrowLeft size={18} className="text-slate-600" />
         </button>
@@ -376,207 +533,270 @@ const WorkspaceView: React.FC<Props> = ({ anchor, onBack }) => {
             <Mic size={16} className="text-white" />
           </div>
           <div>
-            <h1 className="text-base font-black text-slate-900">{anchor.name} 工作台</h1>
-            <p className="text-xs text-slate-400">质检历史记录</p>
+            <div className="flex items-center gap-2">
+              <h1 className="text-base font-black text-slate-900">{anchor.name}</h1>
+              {enableQc ? (
+                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[9px] font-bold rounded-full bg-blue-50 text-blue-600 border border-blue-100">
+                  <Shield size={8} /> 质检
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[9px] font-bold rounded-full bg-amber-50 text-amber-600 border border-amber-100">
+                  <Eye size={8} /> 跟踪
+                </span>
+              )}
+            </div>
+            <p className="text-[10px] text-slate-400">工作台</p>
           </div>
-        </div>
-        <div className="ml-auto flex gap-2">
-          <button onClick={loadTasks} className="w-9 h-9 flex items-center justify-center rounded-xl hover:bg-slate-100 transition-colors text-slate-400 hover:text-slate-600">
-            <RefreshCw size={16} />
-          </button>
-          <button
-            onClick={() => { setPanelMode('new-check'); resetNewCheck(); }}
-            className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-bold rounded-xl transition-all shadow-md shadow-blue-100"
-          >
-            <Plus size={16} />
-            新建质检
-          </button>
         </div>
       </div>
 
-      <div className="flex-1 flex overflow-hidden" style={{ height: 'calc(100vh - 73px)' }}>
-        {/* 左侧：报告历史表格 */}
-        <div className={`flex flex-col overflow-hidden transition-all duration-300 ${panelMode === 'new-check' ? 'flex-1' : 'flex-1'}`}>
-          {error && (
-            <div className="mx-4 mt-4 bg-red-50 border border-red-100 rounded-xl p-3 flex items-start gap-2 shrink-0">
-              <AlertTriangle size={14} className="text-red-500 shrink-0 mt-0.5" />
-              <p className="text-xs text-red-600">{error}</p>
-            </div>
-          )}
-
-          {!hasStandards && hasStandards !== null && (
-            <div className="mx-4 mt-4 bg-amber-50 border border-amber-100 rounded-xl p-3 flex items-start gap-2 shrink-0">
-              <AlertTriangle size={14} className="text-amber-500 shrink-0 mt-0.5" />
-              <p className="text-xs text-amber-700">尚未配置话术！请先前往「话术管理」上传话术，才能发起质检。</p>
-            </div>
-          )}
-
-          {loadingTasks ? (
-            <div className="flex justify-center pt-12"><Loader2 size={28} className="text-blue-500 animate-spin" /></div>
-          ) : tasks.length === 0 ? (
-            <div className="flex flex-col items-center justify-center flex-1 gap-4 text-slate-400 p-8">
-              <FileText size={40} className="opacity-30" />
-              <p className="text-sm">暂无质检记录</p>
-              <button
-                onClick={() => { setPanelMode('new-check'); resetNewCheck(); }}
-                className="flex items-center gap-2 px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-sm font-bold rounded-xl shadow-md transition-all"
-              >
-                <Plus size={16} /> 发起第一次质检
-              </button>
-            </div>
-          ) : (
-            <div className="flex-1 overflow-auto">
-              <table className="w-full text-xs">
-                <thead className="bg-white border-b border-slate-100 sticky top-0 z-10">
-                  <tr>
-                    <th className="text-left px-4 py-3 font-bold text-slate-500 cursor-pointer select-none" onClick={() => toggleSort('created_at')}>
-                      <div className="flex items-center gap-1">质检时间 <SortIcon col="created_at" /></div>
-                    </th>
-                    <th className="text-left px-4 py-3 font-bold text-slate-500 max-w-[180px]">文件名</th>
-                    <th className="text-left px-4 py-3 font-bold text-slate-500">话术版本</th>
-                    <th className="text-left px-4 py-3 font-bold text-slate-500">模式</th>
-                    <th className="text-left px-4 py-3 font-bold text-slate-500 cursor-pointer select-none" onClick={() => toggleSort('score_r1')}>
-                      <div className="flex items-center gap-1">第一轮 <SortIcon col="score_r1" /></div>
-                    </th>
-                    <th className="text-left px-4 py-3 font-bold text-slate-500">第二轮</th>
-                    <th className="text-left px-4 py-3 font-bold text-slate-500">状态</th>
-                    <th className="text-left px-4 py-3 font-bold text-slate-500">操作</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-50">
-                  {sortedTasks.map(task => (
-                    <tr key={task.id} className="hover:bg-white transition-colors">
-                      <td className="px-4 py-3 text-slate-600 whitespace-nowrap">{task.created_at?.slice(5, 16)}</td>
-                      <td className="px-4 py-3 text-slate-600 max-w-[180px]">
-                        <p className="truncate" title={task.transcript_filename}>{task.transcript_filename}</p>
-                      </td>
-                      <td className="px-4 py-3 text-slate-500">{(task as any).standards_version_label || '-'}</td>
-                      <td className="px-4 py-3">
-                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${task.is_dual_mode ? 'bg-indigo-100 text-indigo-600' : 'bg-slate-100 text-slate-500'}`}>
-                          {task.is_dual_mode ? '双轮' : '单轮'}
-                        </span>
-                      </td>
-                      <td className={`px-4 py-3 text-sm ${scoreColor(task.score_r1)}`}>
-                        {task.score_r1 !== null ? `${task.score_r1}分` : '—'}
-                      </td>
-                      <td className={`px-4 py-3 text-sm ${scoreColor(task.score_r2)}`}>
-                        {task.score_r2 !== null ? `${task.score_r2}分` : '—'}
-                      </td>
-                      <td className="px-4 py-3">{statusBadge(task)}</td>
-                      <td className="px-4 py-3">
-                        {task.status === 'completed' ? (
-                          <button
-                            onClick={() => viewTaskReport(task)}
-                            className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-[10px] font-bold rounded-lg transition-all"
-                          >
-                            查看
-                          </button>
-                        ) : task.status === 'failed' ? (
-                          <span className="text-red-400 text-[10px]">{task.error_message?.slice(0, 20) || '失败'}</span>
-                        ) : (
-                          <span className="text-slate-400 text-[10px]">{task.progress_message || '等待中...'}</span>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+      {/* 独立全宽 Tab 栏 */}
+      <div className="bg-white border-b border-slate-200 px-6 flex items-center shrink-0 shadow-sm">
+        <div className="flex">
+          <button
+            onClick={() => setActiveTab('replay')}
+            className={`flex items-center gap-2 px-5 py-3 text-sm font-bold border-b-2 transition-all ${
+              activeTab === 'replay'
+                ? 'border-blue-600 text-blue-600 bg-blue-50/50'
+                : 'border-transparent text-slate-400 hover:text-slate-600 hover:bg-slate-50'
+            }`}
+          >
+            <Video size={16} />
+            全场回看
+          </button>
+          {enableQc && (
+            <button
+              onClick={() => setActiveTab('qc')}
+              className={`flex items-center gap-2 px-5 py-3 text-sm font-bold border-b-2 transition-all ${
+                activeTab === 'qc'
+                  ? 'border-blue-600 text-blue-600 bg-blue-50/50'
+                  : 'border-transparent text-slate-400 hover:text-slate-600 hover:bg-slate-50'
+              }`}
+            >
+              <Shield size={16} />
+              话术质检
+            </button>
           )}
         </div>
 
-        {/* 右侧：新建质检面板 */}
-        {panelMode === 'new-check' && (
-          <div className="w-[380px] bg-white border-l border-slate-100 flex flex-col shrink-0 shadow-xl overflow-y-auto">
-            <div className="px-5 py-4 border-b border-slate-50 flex items-center justify-between shrink-0">
-              <div>
-                <h2 className="text-sm font-black text-slate-800">新建质检</h2>
-                <p className="text-xs text-slate-400">{anchor.name}</p>
-              </div>
-              <button onClick={() => { setPanelMode('list'); resetNewCheck(); }} className="w-8 h-8 flex items-center justify-center rounded-xl hover:bg-slate-100 text-slate-400 transition-colors text-lg font-light">×</button>
-            </div>
+        {/* 右侧操作按钮 */}
+        <div className="ml-auto flex gap-2 py-2">
+          {activeTab === 'qc' && enableQc && (
+            <>
+              <button onClick={loadTasks} className="w-9 h-9 flex items-center justify-center rounded-xl hover:bg-slate-100 transition-colors text-slate-400 hover:text-slate-600">
+                <RefreshCw size={16} />
+              </button>
+              <button
+                onClick={() => { setPanelMode('new-check'); resetNewCheck(); }}
+                className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-bold rounded-xl transition-all shadow-md shadow-blue-100"
+              >
+                <Plus size={16} /> 新建质检
+              </button>
+            </>
+          )}
+        </div>
+      </div>
 
-            <div className="p-5 flex-1 space-y-5">
-              {/* 话术状态 */}
-              <div className={`rounded-xl p-3 flex items-center gap-2 text-xs ${hasStandards ? 'bg-green-50 border border-green-100' : 'bg-amber-50 border border-amber-100'}`}>
-                {hasStandards
-                  ? <><CheckCircle2 size={14} className="text-green-600 shrink-0" /><span className="text-green-700 font-medium">话术已就绪，自动加载最新版本</span></>
-                  : <><AlertTriangle size={14} className="text-amber-500 shrink-0" /><span className="text-amber-700">话术未配置，请先到「话术管理」上传</span></>
-                }
-              </div>
+      {/* ====== Tab 内容区 ====== */}
+      <div className="flex-1 flex overflow-hidden" style={{ height: 'calc(100vh - 100px)' }}>
 
-              {/* 上传文字稿 */}
-              <div>
-                <p className="text-xs font-black text-slate-600 mb-2">上传直播文字稿</p>
-                {transcript.length === 0 ? (
-                  <FileUploader
-                    title="上传文字稿"
-                    description=".docx / .txt / .csv"
-                    accept=".csv,.docx,.txt"
-                    icon={<FileText size={24} />}
-                    onFileLoaded={handleTranscriptUpload}
-                  />
-                ) : (
-                  <div className="bg-slate-50 rounded-xl border border-slate-200 p-4">
-                    <div className="flex items-start gap-2 mb-3">
-                      <CheckCircle2 size={16} className="text-green-500 shrink-0 mt-0.5" />
-                      <div className="overflow-hidden">
-                        <p className="text-xs font-bold text-slate-800 truncate">{metadata.fileName}</p>
-                        <p className="text-[10px] text-slate-400">{transcript.length} 字符</p>
-                      </div>
-                    </div>
-                    <div className="bg-white rounded-lg p-2 mb-3 border border-slate-100 max-h-20 overflow-hidden relative">
-                      <p className="text-[10px] text-slate-500 font-mono leading-relaxed">{transcript.slice(0, 200)}...</p>
-                      <div className="absolute bottom-0 left-0 w-full h-6 bg-gradient-to-t from-white to-transparent"></div>
-                    </div>
-                    <button onClick={() => { setTranscript(''); setFullRawText(''); setTranscriptFileName(''); }} className="text-[10px] text-slate-400 hover:text-slate-600 w-full text-center">重新上传</button>
-                  </div>
-                )}
-              </div>
+        {/* ====== 全场回看 Tab ====== */}
+        {activeTab === 'replay' && (
+          <div className="flex-1 overflow-hidden">
+            <SessionListView anchor={anchor} onBack={() => {}} />
+          </div>
+        )}
 
-              {/* 双轮开关 */}
-              {transcript.length > 0 && (
-                <div
-                  className={`p-3 rounded-xl border flex items-center gap-3 cursor-pointer select-none transition-colors ${isDualRound ? 'bg-indigo-50 border-indigo-200' : 'bg-slate-50 border-slate-200'}`}
-                  onClick={() => setIsDualRound(!isDualRound)}
-                >
-                  <div className={`w-10 h-6 rounded-full relative transition-colors ${isDualRound ? 'bg-indigo-600' : 'bg-slate-300'}`}>
-                    <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-transform shadow ${isDualRound ? 'left-5' : 'left-1'}`}></div>
-                  </div>
-                  <div className="flex-1">
-                    <div className="flex items-center gap-1.5">
-                      <Split size={14} className={isDualRound ? 'text-indigo-600' : 'text-slate-400'} />
-                      <p className={`text-xs font-bold ${isDualRound ? 'text-indigo-900' : 'text-slate-600'}`}>包含两轮演练（自动拆分）</p>
-                    </div>
-                    <p className="text-[10px] text-slate-400 mt-0.5">
-                      {isDualRound ? 'AI 自动切分为两轮分别质检' : '整个文本视为一轮质检'}
-                    </p>
-                  </div>
-                </div>
-              )}
-
+        {/* ====== 话术质检 Tab ====== */}
+        {activeTab === 'qc' && enableQc && (
+          <>
+            {/* 左侧：质检历史表格 */}
+            <div className={`flex flex-col overflow-hidden transition-all duration-300 flex-1`}>
               {error && (
-                <div className="bg-red-50 border border-red-100 rounded-xl p-3 flex items-start gap-2">
+                <div className="mx-4 mt-4 bg-red-50 border border-red-100 rounded-xl p-3 flex items-start gap-2 shrink-0">
                   <AlertTriangle size={14} className="text-red-500 shrink-0 mt-0.5" />
                   <p className="text-xs text-red-600">{error}</p>
                 </div>
               )}
+
+              {!hasStandards && hasStandards !== null && (
+                <div className="mx-4 mt-4 bg-amber-50 border border-amber-100 rounded-xl p-3 flex items-start gap-2 shrink-0">
+                  <AlertTriangle size={14} className="text-amber-500 shrink-0 mt-0.5" />
+                  <p className="text-xs text-amber-700">尚未配置话术！请先前往「话术管理」上传话术，才能发起质检。</p>
+                </div>
+              )}
+
+              {loadingTasks ? (
+                <div className="flex justify-center pt-12"><Loader2 size={28} className="text-blue-500 animate-spin" /></div>
+              ) : tasks.length === 0 ? (
+                <div className="flex flex-col items-center justify-center flex-1 gap-4 text-slate-400 p-8">
+                  <FileText size={40} className="opacity-30" />
+                  <p className="text-sm">暂无质检记录</p>
+                  <button
+                    onClick={() => { setPanelMode('new-check'); resetNewCheck(); }}
+                    className="flex items-center gap-2 px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-sm font-bold rounded-xl shadow-md transition-all"
+                  >
+                    <Plus size={16} /> 发起第一次质检
+                  </button>
+                </div>
+              ) : (
+                <div className="flex-1 overflow-auto">
+                  <table className="w-full text-xs">
+                    <thead className="bg-white border-b border-slate-100 sticky top-0 z-10">
+                      <tr>
+                        <th className="text-left px-4 py-3 font-bold text-slate-500 cursor-pointer select-none" onClick={() => toggleSort('created_at')}>
+                          <div className="flex items-center gap-1">开播时间 <SortIcon col="created_at" /></div>
+                        </th>
+                        <th className="text-left px-4 py-3 font-bold text-slate-500 max-w-[180px]">文件名</th>
+                        <th className="text-left px-4 py-3 font-bold text-slate-500">话术版本</th>
+                        <th className="text-left px-4 py-3 font-bold text-slate-500">模式</th>
+                        <th className="text-left px-4 py-3 font-bold text-slate-500 cursor-pointer select-none" onClick={() => toggleSort('score_r1')}>
+                          <div className="flex items-center gap-1">第一轮 <SortIcon col="score_r1" /></div>
+                        </th>
+                        <th className="text-left px-4 py-3 font-bold text-slate-500">第二轮</th>
+                        <th className="text-left px-4 py-3 font-bold text-slate-500">状态</th>
+                        <th className="text-left px-4 py-3 font-bold text-slate-500">操作</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-50">
+                      {sortedTasks.map(task => (
+                        <tr key={task.id} className="hover:bg-white transition-colors">
+                          <td className="px-4 py-3 text-slate-600 whitespace-nowrap">{(task as any).live_start_time || task.created_at?.replace(/^\d{4}\//, '').replace(/:\d{2}$/, '') || '--'}</td>
+                          <td className="px-4 py-3 text-slate-600 max-w-[180px]">
+                            <div className="flex items-center gap-1.5">
+                              {(task as any).source === 'auto_asr' && (
+                                <span className="px-1.5 py-0.5 bg-emerald-50 text-emerald-600 text-[8px] font-black rounded border border-emerald-100 shrink-0">自动</span>
+                              )}
+                              <p className="truncate" title={task.transcript_filename}>{task.transcript_filename}</p>
+                            </div>
+                          </td>
+                          <td className="px-4 py-3 text-slate-500">{(task as any).standards_version_label || '-'}</td>
+                          <td className="px-4 py-3">
+                            <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${task.is_dual_mode ? 'bg-indigo-100 text-indigo-600' : 'bg-slate-100 text-slate-500'}`}>
+                              {task.is_dual_mode ? '双轮' : '单轮'}
+                            </span>
+                          </td>
+                          <td className={`px-4 py-3 text-sm ${scoreColor(task.score_r1)}`}>
+                            {task.score_r1 !== null ? `${task.score_r1}分` : '—'}
+                          </td>
+                          <td className={`px-4 py-3 text-sm ${scoreColor(task.score_r2)}`}>
+                            {task.score_r2 !== null ? `${task.score_r2}分` : '—'}
+                          </td>
+                          <td className="px-4 py-3">{statusBadge(task)}</td>
+                          <td className="px-4 py-3">
+                            {task.status === 'completed' ? (
+                              <button
+                                onClick={() => viewTaskReport(task)}
+                                className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-[10px] font-bold rounded-lg transition-all"
+                              >查看</button>
+                            ) : task.status === 'failed' ? (
+                              <span className="text-red-400 text-[10px]">{task.error_message?.slice(0, 20) || '失败'}</span>
+                            ) : (
+                              <span className="text-slate-400 text-[10px]">{task.progress_message || '等待中...'}</span>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </div>
 
-            {/* 底部按钮 */}
-            <div className="p-5 border-t border-slate-50 shrink-0">
-              <button
-                onClick={startScanningAnchors}
-                disabled={!transcript || isScanning || !hasStandards}
-                className="w-full py-3.5 bg-blue-600 hover:bg-blue-700 text-white font-bold text-sm rounded-xl shadow-md shadow-blue-100 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-              >
-                {'下一步：选择锚点'}
-              </button>
-              <p className="text-[10px] text-center text-slate-400 mt-2">
-                提交后后台运行，可关闭页面
-              </p>
-            </div>
-          </div>
+            {/* 右侧：新建质检面板 */}
+            {panelMode === 'new-check' && (
+              <div className="w-[380px] bg-white border-l border-slate-100 flex flex-col shrink-0 shadow-xl overflow-y-auto">
+                <div className="px-5 py-4 border-b border-slate-50 flex items-center justify-between shrink-0">
+                  <div>
+                    <h2 className="text-sm font-black text-slate-800">新建质检</h2>
+                    <p className="text-xs text-slate-400">{anchor.name}</p>
+                  </div>
+                  <button onClick={() => { setPanelMode('list'); resetNewCheck(); }} className="w-8 h-8 flex items-center justify-center rounded-xl hover:bg-slate-100 text-slate-400 transition-colors text-lg font-light">×</button>
+                </div>
+
+                <div className="p-5 flex-1 space-y-5">
+                  {/* 话术状态 */}
+                  <div className={`rounded-xl p-3 flex items-center gap-2 text-xs ${hasStandards ? 'bg-green-50 border border-green-100' : 'bg-amber-50 border border-amber-100'}`}>
+                    {hasStandards
+                      ? <><CheckCircle2 size={14} className="text-green-600 shrink-0" /><span className="text-green-700 font-medium">话术已就绪，自动加载最新版本</span></>
+                      : <><AlertTriangle size={14} className="text-amber-500 shrink-0" /><span className="text-amber-700">话术未配置，请先到「话术管理」上传</span></>
+                    }
+                  </div>
+
+                  {/* 上传文字稿 */}
+                  <div>
+                    <p className="text-xs font-black text-slate-600 mb-2">上传直播文字稿</p>
+                    {transcript.length === 0 ? (
+                      <FileUploader
+                        title="上传文字稿"
+                        description=".docx / .txt / .csv"
+                        accept=".csv,.docx,.txt"
+                        icon={<FileText size={24} />}
+                        onFileLoaded={handleTranscriptUpload}
+                      />
+                    ) : (
+                      <div className="bg-slate-50 rounded-xl border border-slate-200 p-4">
+                        <div className="flex items-start gap-2 mb-3">
+                          <CheckCircle2 size={16} className="text-green-500 shrink-0 mt-0.5" />
+                          <div className="overflow-hidden">
+                            <p className="text-xs font-bold text-slate-800 truncate">{metadata.fileName}</p>
+                            <p className="text-[10px] text-slate-400">{transcript.length} 字符</p>
+                          </div>
+                        </div>
+                        <div className="bg-white rounded-lg p-2 mb-3 border border-slate-100 max-h-20 overflow-hidden relative">
+                          <p className="text-[10px] text-slate-500 font-mono leading-relaxed">{transcript.slice(0, 200)}...</p>
+                          <div className="absolute bottom-0 left-0 w-full h-6 bg-gradient-to-t from-white to-transparent"></div>
+                        </div>
+                        <button onClick={() => { setTranscript(''); setFullRawText(''); setTranscriptFileName(''); }} className="text-[10px] text-slate-400 hover:text-slate-600 w-full text-center">重新上传</button>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* 双轮开关 */}
+                  {transcript.length > 0 && (
+                    <div
+                      className={`p-3 rounded-xl border flex items-center gap-3 cursor-pointer select-none transition-colors ${isDualRound ? 'bg-indigo-50 border-indigo-200' : 'bg-slate-50 border-slate-200'}`}
+                      onClick={() => setIsDualRound(!isDualRound)}
+                    >
+                      <div className={`w-10 h-6 rounded-full relative transition-colors ${isDualRound ? 'bg-indigo-600' : 'bg-slate-300'}`}>
+                        <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-transform shadow ${isDualRound ? 'left-5' : 'left-1'}`}></div>
+                      </div>
+                      <div className="flex-1">
+                        <div className="flex items-center gap-1.5">
+                          <Split size={14} className={isDualRound ? 'text-indigo-600' : 'text-slate-400'} />
+                          <p className={`text-xs font-bold ${isDualRound ? 'text-indigo-900' : 'text-slate-600'}`}>包含两轮演练（自动拆分）</p>
+                        </div>
+                        <p className="text-[10px] text-slate-400 mt-0.5">
+                          {isDualRound ? 'AI 自动切分为两轮分别质检' : '整个文本视为一轮质检'}
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {error && (
+                    <div className="bg-red-50 border border-red-100 rounded-xl p-3 flex items-start gap-2">
+                      <AlertTriangle size={14} className="text-red-500 shrink-0 mt-0.5" />
+                      <p className="text-xs text-red-600">{error}</p>
+                    </div>
+                  )}
+                </div>
+
+                {/* 底部按钮 */}
+                <div className="p-5 border-t border-slate-50 shrink-0">
+                  <button
+                    onClick={startScanningAnchors}
+                    disabled={!transcript || isScanning || !hasStandards}
+                    className="w-full py-3.5 bg-blue-600 hover:bg-blue-700 text-white font-bold text-sm rounded-xl shadow-md shadow-blue-100 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                  >
+                    {'下一步：选择锚点'}
+                  </button>
+                  <p className="text-[10px] text-center text-slate-400 mt-2">
+                    提交后后台运行，可关闭页面
+                  </p>
+                </div>
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>
