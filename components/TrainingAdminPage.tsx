@@ -120,6 +120,36 @@ const TrainingAdminPage: React.FC<Props> = ({ onBack }) => {
     } catch (e: any) { setError(e.message); }
   };
 
+  const updateCourseVersion = async (courseId: number, versionId: number) => {
+    try {
+      const r = await fetch(`/api/training/courses/${courseId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ standards_version_id: versionId })
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error);
+
+      // 更新本地状态
+      setCourses(prev => prev.map(c => 
+        c.id === courseId 
+          ? { ...c, standards_version_id: versionId, standards_version_label: data.course.standards_version_label } 
+          : c
+      ));
+
+      if (selectedCourse?.id === courseId) {
+        setSelectedCourse(prev => prev ? { 
+          ...prev, 
+          standards_version_id: versionId, 
+          standards_version_label: data.course.standards_version_label 
+        } : null);
+      }
+      showSuccess('关联话术版本已更新');
+    } catch (e: any) { 
+      setError(e.message); 
+    }
+  };
+
   // ============================================================
   // Slides
   // ============================================================
@@ -138,7 +168,7 @@ const TrainingAdminPage: React.FC<Props> = ({ onBack }) => {
     if (!selectedCourse || !e.target.files || e.target.files.length === 0) return;
     setUploadingImages(true);
     setError(null);
-    const files = Array.from(e.target.files).sort((a, b) => a.name.localeCompare(b.name));
+    const files = Array.from(e.target.files as unknown as File[]).sort((a, b) => a.name.localeCompare(b.name));
     const currentMaxOrder = slides.length > 0 ? Math.max(...slides.map(s => s.order)) : 0;
 
     try {
@@ -161,7 +191,12 @@ const TrainingAdminPage: React.FC<Props> = ({ onBack }) => {
         const data = await r.json();
         if (r.ok) newSlides.push(data);
       }
-      setSlides(prev => [...prev, ...newSlides].sort((a, b) => a.order - b.order));
+      setSlides(prev => {
+        const combined = [...prev, ...newSlides].sort((a, b) => a.order - b.order);
+        // 新上传的图片默认 count 为 1，加入队列后需要全量计算起止逻辑并让状态置脏
+        setOrderDirty(true);
+        return recalcRanges(combined);
+      });
       showSuccess(`已上传 ${newSlides.length} 张幻灯片`);
     } catch (e: any) { setError(e.message); }
     finally {
@@ -181,14 +216,23 @@ const TrainingAdminPage: React.FC<Props> = ({ onBack }) => {
 
   const updateSlide = async (id: number, fields: Partial<TrainingSlide>) => {
     try {
-      const r = await fetch(`/api/training/slides/${id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(fields)
-      });
-      const data = await r.json();
-      if (!r.ok) throw new Error(data.error);
-      setSlides(prev => prev.map(s => s.id === id ? { ...s, ...data } : s));
+      if (fields.standard_end !== undefined || fields.standard_start !== undefined) {
+        // 如果是触发起止范围发生变化，不走单独保存，而是强行影响全量，通过保存状态同步给后端
+        setSlides(prev => {
+            const next = prev.map(s => s.id === id ? { ...s, ...fields } : s);
+            return recalcRanges(next);
+        });
+        setOrderDirty(true);
+      } else {
+        const r = await fetch(`/api/training/slides/${id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(fields)
+        });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error);
+        setSlides(prev => prev.map(s => s.id === id ? { ...s, ...data } : s));
+      }
     } catch (e: any) { setError(e.message); }
   };
 
@@ -201,6 +245,18 @@ const TrainingAdminPage: React.FC<Props> = ({ onBack }) => {
     } catch (e: any) { setError(e.message); }
   };
 
+  // ---- 自动推算每页范围 ----
+  const recalcRanges = (list: TrainingSlide[]) => {
+    let currentStart = 1;
+    return list.map(s => {
+      let count = s.standard_end - s.standard_start + 1;
+      if (count < 0) count = 0;
+      const mapped = { ...s, standard_start: currentStart, standard_end: currentStart + count - 1 };
+      currentStart += count;
+      return mapped;
+    });
+  };
+
   // ---- 拖拽排序 ----
   const handleDragStart = (idx: number) => {
     setDragIndex(idx);
@@ -210,12 +266,12 @@ const TrainingAdminPage: React.FC<Props> = ({ onBack }) => {
     e.preventDefault();
     if (dragIndex === null || dragIndex === idx) return;
     setOverIndex(idx);
-    // 实时重排（本地）
+    // 实时重排（本地）并重新计算区间
     setSlides(prev => {
       const next = [...prev];
       const [removed] = next.splice(dragIndex, 1);
       next.splice(idx, 0, removed);
-      return next;
+      return recalcRanges(next);
     });
     setDragIndex(idx);
   };
@@ -230,15 +286,20 @@ const TrainingAdminPage: React.FC<Props> = ({ onBack }) => {
     if (!selectedCourse) return;
     setSavingOrder(true);
     try {
-      const slide_ids = slides.map(s => s.id);
-      const r = await fetch(`/api/training/courses/${selectedCourse.id}/slides/reorder`, {
+      const updSlides = slides.map((s, idx) => ({
+        id: s.id,
+        order: idx + 1,
+        standard_start: s.standard_start,
+        standard_end: s.standard_end
+      }));
+      const r = await fetch(`/api/training/courses/${selectedCourse.id}/slides/bulk-update`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ slide_ids })
+        body: JSON.stringify({ slides: updSlides })
       });
-      if (!r.ok) throw new Error('保存顺序失败');
+      if (!r.ok) throw new Error('保存失败');
       setOrderDirty(false);
-      showSuccess('幻灯片顺序已保存 ✓');
+      showSuccess('幻灯片顺序及关联范围已保存 ✓');
     } catch (e: any) {
       setError(e.message);
     } finally {
@@ -422,9 +483,21 @@ const TrainingAdminPage: React.FC<Props> = ({ onBack }) => {
                       onClick={() => { setSelectedCourse(c); setTab('slides'); }}
                     >
                       <p className="text-sm font-bold text-slate-800 truncate">{c.title}</p>
-                      <p className="text-xs text-slate-400 mt-0.5">
-                        话术版本：{c.standards_version_label} · {c.created_at}
-                      </p>
+                      <div className="flex items-center gap-1.5 mt-1.5" onClick={(e) => e.stopPropagation()}>
+                        <span className="text-xs text-slate-400">话术版本：</span>
+                        <select 
+                          value={c.standards_version_id}
+                          onChange={(e) => updateCourseVersion(c.id, parseInt(e.target.value))}
+                          className="text-xs border border-slate-200 rounded px-1.5 py-0.5 text-slate-600 outline-none focus:border-emerald-400 bg-slate-50 hover:bg-white transition-colors cursor-pointer"
+                        >
+                           {versions.map(v => (
+                             <option key={v.id} value={v.id}>
+                               {v.version_label} {v.is_current ? '(当前最新)' : ''}
+                             </option>
+                           ))}
+                        </select>
+                        <span className="text-xs text-slate-400">· {c.created_at}</span>
+                      </div>
                     </div>
                     <button
                       onClick={() => { setSelectedCourse(c); setTab('slides'); }}
@@ -478,18 +551,33 @@ const TrainingAdminPage: React.FC<Props> = ({ onBack }) => {
                 <div className="flex items-center justify-between">
                   <div>
                     <h2 className="text-base font-black text-slate-800">{selectedCourse.title}</h2>
-                    <p className="text-xs text-slate-400">绑定话术：{selectedCourse.standards_version_label} · 共 {slides.length} 张幻灯片</p>
+                    <div className="flex items-center gap-2 mt-1">
+                      <span className="text-xs text-slate-400">绑定话术版本：</span>
+                      <select 
+                        value={selectedCourse.standards_version_id}
+                        onChange={(e) => updateCourseVersion(selectedCourse.id, parseInt(e.target.value))}
+                        className="text-xs border border-slate-200 rounded px-1.5 py-0.5 text-slate-600 outline-none focus:border-emerald-400 bg-slate-50 hover:bg-white transition-colors cursor-pointer"
+                      >
+                         {versions.map(v => (
+                           <option key={v.id} value={v.id}>
+                             {v.version_label} {v.is_current ? '(当前最新)' : ''}
+                           </option>
+                         ))}
+                      </select>
+                      <span className="text-xs text-slate-400 ml-2">· 共 {slides.length} 张幻灯片</span>
+                    </div>
                   </div>
                   <div className="flex items-center gap-2">
-                    {/* 确认保存顺序按钮 */}
+                    {/* 确认保存顺序与范围按钮 */}
                     {orderDirty && (
                       <button
                         onClick={saveOrder}
                         disabled={savingOrder}
                         className="flex items-center gap-1.5 px-3 py-2 bg-teal-500 hover:bg-teal-600 text-white text-xs font-bold rounded-xl transition-all disabled:opacity-60 shadow-md shadow-teal-200"
+                        title="你有条数或顺序的改动，请点击保存"
                       >
                         {savingOrder ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}
-                        确认保存顺序
+                        确认保存变更
                       </button>
                     )}
                     <label className={`flex items-center gap-2 px-3 py-2 bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-bold rounded-xl transition-all cursor-pointer ${uploadingImages ? 'opacity-60 pointer-events-none' : ''}`}>
@@ -647,12 +735,33 @@ const SlideRow: React.FC<SlideRowProps> = ({
   onUpdate, onDelete
 }) => {
   const [title, setTitle] = useState(slide.title);
-  const [start, setStart] = useState(String(slide.standard_start));
-  const [end, setEnd] = useState(String(slide.standard_end));
+  
+  const count = slide.standard_end - slide.standard_start + 1;
+  const [localCount, setLocalCount] = useState(String(Math.max(0, count)));
   const [expanded, setExpanded] = useState(false);
 
-  const handleSave = () => {
-    onUpdate({ title, standard_start: parseInt(start) || 1, standard_end: parseInt(end) || 1 });
+  // 当父组件进行了重算，我们需要同步新的 count 给输入框
+  useEffect(() => {
+    setLocalCount(String(Math.max(0, slide.standard_end - slide.standard_start + 1)));
+  }, [slide.standard_start, slide.standard_end]);
+
+  const handleSaveTitle = () => {
+    if (title !== slide.title) {
+       onUpdate({ title });
+    }
+  };
+
+  const handleSaveCount = () => {
+    const c = parseInt(localCount);
+    if (!isNaN(c) && c >= 0) {
+      const oldCount = slide.standard_end - slide.standard_start + 1;
+      if (c !== oldCount) {
+         // 只用改 end 即可触发上层整个 slide 列表的大重算！
+         onUpdate({ standard_end: slide.standard_start + c - 1 });
+      }
+    } else {
+      setLocalCount(String(Math.max(0, count))); // 还原错误输入
+    }
   };
 
   return (
@@ -692,28 +801,34 @@ const SlideRow: React.FC<SlideRowProps> = ({
         <input
           value={title}
           onChange={e => setTitle(e.target.value)}
-          onBlur={handleSave}
+          onBlur={handleSaveTitle}
           className="flex-1 text-sm font-bold text-slate-700 bg-transparent border-b border-transparent focus:border-emerald-300 outline-none transition-all px-1 py-0.5 min-w-0"
           placeholder="幻灯片标题"
         />
 
-        {/* 话术范围 */}
-        <div className="flex items-center gap-1 shrink-0 text-xs text-slate-500">
-          <span className="text-slate-400">第</span>
-          <input
-            value={start}
-            onChange={e => setStart(e.target.value)}
-            onBlur={handleSave}
-            className="w-10 text-center border border-slate-200 rounded-lg px-1 py-1 text-xs outline-none focus:border-emerald-400"
-          />
-          <span className="text-slate-400">—</span>
-          <input
-            value={end}
-            onChange={e => setEnd(e.target.value)}
-            onBlur={handleSave}
-            className="w-10 text-center border border-slate-200 rounded-lg px-1 py-1 text-xs outline-none focus:border-emerald-400"
-          />
-          <span className="text-slate-400">条</span>
+        {/* 包含话术量区：填的是数量，自动生成的是范围 */}
+        <div className="flex items-center shrink-0 pr-3 rounded-lg overflow-hidden bg-slate-50 border border-slate-100 shadow-sm transition-all focus-within:border-emerald-300 focus-within:ring-2 focus-within:ring-emerald-50">
+          <div className="bg-slate-100/60 px-2 py-1.5 flex items-center gap-1 group/input">
+            <span className="text-xs font-bold text-slate-500">包含</span>
+            <input
+              value={localCount}
+              onChange={e => setLocalCount(e.target.value)}
+              onBlur={handleSaveCount}
+              className="w-8 text-center bg-white border border-slate-200 rounded text-emerald-600 font-extrabold text-xs py-0.5 outline-none focus:border-emerald-400 select-all"
+            />
+            <span className="text-xs font-bold text-slate-500">条</span>
+          </div>
+          <div className="pl-3 py-1.5 min-w-[100px] text-center">
+            {count > 0 ? (
+              <span className="text-[11px] font-mono text-slate-400 tracking-wider">
+                <strong className="text-slate-600 font-bold mx-0.5">{slide.standard_start}</strong> 
+                - 
+                <strong className="text-slate-600 font-bold mx-0.5">{slide.standard_end}</strong>
+              </span>
+            ) : (
+              <span className="text-[11px] text-slate-400">无话术</span>
+            )}
+          </div>
         </div>
 
         {/* 展开/删除 */}

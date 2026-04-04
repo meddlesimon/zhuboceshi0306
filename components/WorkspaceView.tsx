@@ -112,19 +112,17 @@ const WorkspaceView: React.FC<Props> = ({ anchor, onBack }) => {
     }
   };
 
-  // 单轮和双轮都走锚点扫描流程
-  const startScanningAnchors = async () => {
-    setIsScanning(true);
+  // 直接进入手动选择锚点界面（不再调用 AI 预扫）
+  const startScanningAnchors = () => {
     setError(null);
-    try {
-      const anchors = await findCandidateAnchors(transcript);
-      setCandidateAnchors(anchors);
-      setPanelMode('verify-anchors');
-    } catch (err: any) {
-      setError(`锚点预找失败: ${err.message}`);
-    } finally {
-      setIsScanning(false);
-    }
+    // 构造全空的锚点，让运营人员手动选择
+    setCandidateAnchors({
+      r1StartPhrase: null, r1StartPos: -1,
+      r1EndPhrase: null, r1EndPos: -1,
+      r2StartPhrase: null, r2StartPos: -1,
+      r2EndPhrase: null, r2EndPos: -1,
+    });
+    setPanelMode('verify-anchors');
   };
 
   const submitTask = async (manualAnchors: AnchorResult | null) => {
@@ -572,9 +570,7 @@ const WorkspaceView: React.FC<Props> = ({ anchor, onBack }) => {
                 disabled={!transcript || isScanning || !hasStandards}
                 className="w-full py-3.5 bg-blue-600 hover:bg-blue-700 text-white font-bold text-sm rounded-xl shadow-md shadow-blue-100 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
               >
-                {isScanning ? (
-                  <><Loader2 size={16} className="animate-spin" /> 正在扫描锚点...</>
-                ) : '下一步：核对锚点'}
+                {'下一步：选择锚点'}
               </button>
               <p className="text-[10px] text-center text-slate-400 mt-2">
                 提交后后台运行，可关闭页面

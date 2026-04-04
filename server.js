@@ -1410,6 +1410,30 @@ app.delete('/api/training/courses/:id', (req, res) => {
   }
 });
 
+app.put('/api/training/courses/:id', (req, res) => {
+  const id = parseInt(req.params.id);
+  const { title, standards_version_id } = req.body;
+  try {
+    const db = loadDB();
+    if (!db.training_courses) return res.status(404).json({ error: '课程不存在' });
+    const course = db.training_courses.find(c => c.id === id);
+    if (!course) return res.status(404).json({ error: '课程不存在' });
+    
+    if (title) course.title = title;
+    if (standards_version_id) {
+      const ver = db.standards_versions.find(v => v.id === parseInt(standards_version_id));
+      if (!ver) return res.status(400).json({ error: '所选话术版本不存在' });
+      course.standards_version_id = parseInt(standards_version_id);
+      course.standards_version_label = ver.version_label;
+    }
+    
+    saveDB(db);
+    res.json({ success: true, course });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // --- 幻灯片管理 ---
 app.get('/api/training/courses/:id/slides', (req, res) => {
   const courseId = parseInt(req.params.id);
@@ -1481,17 +1505,21 @@ app.delete('/api/training/slides/:id', (req, res) => {
   }
 });
 
-// 批量保存某课程的幻灯片顺序
-app.put('/api/training/courses/:id/slides/reorder', (req, res) => {
+// 批量保存某课程的幻灯片（包括顺序和起止条数）
+app.put('/api/training/courses/:id/slides/bulk-update', (req, res) => {
   const courseId = parseInt(req.params.id);
-  const { slide_ids } = req.body; // 按新顺序排列的 id 数组
-  if (!Array.isArray(slide_ids)) return res.status(400).json({ error: 'slide_ids 必须是数组' });
+  const { slides } = req.body; // 包含 {id, order, standard_start, standard_end} 的数组
+  if (!Array.isArray(slides)) return res.status(400).json({ error: 'slides 必须是数组' });
   try {
     const db = loadDB();
     if (!db.training_slides) return res.json({ success: true });
-    slide_ids.forEach((sid, idx) => {
-      const s = db.training_slides.find(s => s.id === sid && s.course_id === courseId);
-      if (s) s.order = idx + 1;
+    slides.forEach(upd => {
+      const s = db.training_slides.find(s => s.id === upd.id && s.course_id === courseId);
+      if (s) {
+        if (upd.order !== undefined) s.order = upd.order;
+        if (upd.standard_start !== undefined) s.standard_start = upd.standard_start;
+        if (upd.standard_end !== undefined) s.standard_end = upd.standard_end;
+      }
     });
     saveDB(db);
     res.json({ success: true });
