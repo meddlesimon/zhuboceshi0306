@@ -1,0 +1,1483 @@
+import React, { useEffect, useState, useRef } from 'react';
+import { Anchor } from '../types';
+import {
+  ArrowLeft, Play, Clock, Calendar, Video, Loader2, AlertTriangle,
+  Search, X, ChevronRight, Monitor, Pause, Shield, Trash2, Sparkles, MessageCircle, FileText, Users
+} from 'lucide-react';
+import AnalysisReportView from './AnalysisReportView';
+
+interface LiveSession {
+  id: number;
+  anchor_id: number;
+  anchor_name: string;
+  title: string;
+  live_date: string;
+  status: string;
+  duration_seconds: number;
+  video_cos_url: string;
+  transcript?: {
+    timestamped_text?: string;
+    full_text?: string;
+  };
+  created_at: string;
+}
+
+interface TranscriptSegment {
+  start: number;
+  end: number;
+  text: string;
+}
+
+interface Props {
+  anchor: Anchor;
+  onBack: () => void;
+  onDetailChange?: (isDetail: boolean) => void;
+  readOnly?: boolean; // 主播端只读模式：隐藏删除、质检等操作
+}
+
+const SessionListView: React.FC<Props> = ({ anchor, onBack, onDetailChange, readOnly }) => {
+  const [sessions, setSessions] = useState<LiveSession[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [selectedSession, setSelectedSession] = useState<LiveSession | null>(null);
+  const [segments, setSegments] = useState<TranscriptSegment[]>([]);
+  const [activeSegIndex, setActiveSegIndex] = useState(-1);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+
+  // 视频加载状态
+  const [videoLoading, setVideoLoading] = useState(true);
+  const [videoError, setVideoError] = useState<string | null>(null);
+  const [videoReady, setVideoReady] = useState(false);
+  const [buffering, setBuffering] = useState(false);
+  const [showMobileVideo, setShowMobileVideo] = useState(true); // 移动端视频收起/展开
+
+  // 移动端检测
+  const [isMobile, setIsMobile] = useState(false);
+  useEffect(() => {
+    const check = () => setIsMobile(window.innerWidth < 768);
+    check();
+    window.addEventListener('resize', check);
+    return () => window.removeEventListener('resize', check);
+  }, []);
+
+  // AI 分析状态
+  const [analysisStatus, setAnalysisStatus] = useState<Record<number, string>>({});
+  const [viewingAnalysis, setViewingAnalysis] = useState<{session: LiveSession, time: string} | null>(null);
+  const isTracking = !anchor.enable_qc; // 跟踪模式（enable_qc 为 0 或 false）
+
+  // 搜索导航
+  const [searchNavIndex, setSearchNavIndex] = useState(0);
+  // 场次更多菜单
+  const [menuOpenId, setMenuOpenId] = useState<number | null>(null);
+  const [retryQcId, setRetryQcId] = useState<number | null>(null);
+
+  // 弹幕 & 在线人数
+  const [rightTab, setRightTab] = useState<'transcript' | 'danmaku'>('transcript');
+  const [danmakuComments, setDanmakuComments] = useState<{t: number; n: string; c: string}[]>([]);
+  const [danmakuViewers, setDanmakuViewers] = useState<{t: number; c: number}[]>([]);
+  const [danmakuLive, setDanmakuLive] = useState(false);
+  const danmakuScrollRef = useRef<HTMLDivElement>(null);
+
+  // 跟踪模式：定时轮询分析状态
+  useEffect(() => {
+    if (!isTracking || sessions.length === 0) return;
+    const poll = async () => {
+      const ids = sessions.map(s => s.id);
+      try {
+        const res = await fetch('/api/analysis/batch-status', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_ids: ids })
+        });
+        const data = await res.json();
+        setAnalysisStatus(data);
+      } catch {}
+    };
+    poll();
+    const timer = setInterval(poll, 8000); // 每8秒刷新
+    return () => clearInterval(timer);
+  }, [isTracking, sessions]);
+
+  // 可拖拽分割线 — 视频 / 逐字稿 / 弹幕 三列
+  const [videoPct, setVideoPct] = useState(() => {
+    try { return parseFloat(localStorage.getItem('replay_video_width') || '40') || 40; } catch { return 40; }
+  });
+  const [transcriptPct, setTranscriptPct] = useState(() => {
+    try { return parseFloat(localStorage.getItem('replay_transcript_width') || '35') || 35; } catch { return 35; }
+  });
+  // 弹幕列宽 = 100 - videoPct - transcriptPct（自动）
+  const isDraggingRef = useRef<'video' | 'transcript' | null>(null);
+  const layoutRef = useRef<HTMLDivElement>(null);
+
+  const handleDragStart = (col: 'video' | 'transcript') => (e: React.MouseEvent) => {
+    e.preventDefault();
+    isDraggingRef.current = col;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    const onMove = (ev: MouseEvent) => {
+      if (!isDraggingRef.current || !layoutRef.current) return;
+      const rect = layoutRef.current.getBoundingClientRect();
+      const x = ev.clientX - rect.left;
+      const totalW = rect.width;
+      if (isDraggingRef.current === 'video') {
+        const newVid = Math.min(Math.max((x / totalW) * 100, 20), 55);
+        setVideoPct(newVid);
+      } else {
+        // 分割逐字稿/弹幕：x 相对整体，减去视频宽度
+        const vidW = (videoPct / 100) * totalW;
+        const newTrans = Math.min(Math.max(((x - vidW) / totalW) * 100, 15), 55);
+        setTranscriptPct(newTrans);
+      }
+    };
+    const onUp = () => {
+      isDraggingRef.current = null;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      setVideoPct(v => { try { localStorage.setItem('replay_video_width', String(v)); } catch {} return v; });
+      setTranscriptPct(t => { try { localStorage.setItem('replay_transcript_width', String(t)); } catch {} return t; });
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  };
+
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const transcriptRef = useRef<HTMLDivElement>(null);
+  const segRefs = useRef<(HTMLDivElement | null)[]>([]);
+
+  useEffect(() => {
+    loadSessions();
+  }, [anchor.name]);
+
+  const loadSessions = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/monitor/sessions/${encodeURIComponent(anchor.name)}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || '加载失败');
+      setSessions(Array.isArray(data) ? data : []);
+      // 跟踪模式：拉取分析状态（不自动触发）
+      if (anchor.enable_qc === false && Array.isArray(data) && data.length > 0) {
+        const ids = data.map(s => s.id);
+        fetch('/api/analysis/batch-status', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_ids: ids })
+        }).then(r => r.json()).then(setAnalysisStatus).catch(() => {});
+      }
+    } catch (e: any) {
+      setError(e.message);
+      setSessions([]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // 选择某个场次，加载详情
+  const selectSession = async (session: LiveSession) => {
+    setSelectedSession(session);
+    onDetailChange?.(true);
+    setSegments([]);
+    setActiveSegIndex(-1);
+    setSearchQuery('');
+    setVideoLoading(true);
+    setVideoError(null);
+    setVideoReady(false);
+    setBuffering(false);
+    setCurrentTime(0);
+    setDuration(0);
+    try {
+      const res = await fetch(`/api/monitor/session/${session.id}`);
+      const data = await res.json();
+      if (data.transcript?.timestamped_text) {
+        const parsed = parseTimestampedText(data.transcript.timestamped_text);
+        setSegments(parsed);
+      }
+      // 更新 session 信息（包含 video_cos_url）
+      setSelectedSession({ ...session, ...data });
+    } catch (e: any) {
+      console.error('加载场次详情失败:', e);
+    }
+  };
+
+  // 重试加载视频
+  const retryVideo = () => {
+    setVideoError(null);
+    setVideoLoading(true);
+    setVideoReady(false);
+    if (videoRef.current && selectedSession?.video_cos_url) {
+      videoRef.current.load();
+    }
+  };
+
+  // 手动触发质检
+  const [triggeringQC, setTriggeringQC] = useState<number | null>(null);
+  const triggerQC = async (session: LiveSession, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (triggeringQC) return;
+    setTriggeringQC(session.id);
+    try {
+      const res = await fetch('/api/webhook/trigger-qc', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ anchor_id: anchor.id, session_id: session.id })
+      });
+      const data = await res.json();
+      if (data.success) {
+        alert(`✅ 质检已触发\n任务ID: ${data.task_id}\n文本: ${data.text_length}字\n模式: ${data.is_dual ? '双轮' : '单轮'}`);
+      } else {
+        alert(`❌ 触发失败: ${data.error || '未知错误'}`);
+      }
+    } catch (err: any) {
+      alert(`❌ 请求失败: ${err.message}`);
+    } finally {
+      setTriggeringQC(null);
+    }
+  };
+
+  // 加载弹幕数据
+  useEffect(() => {
+    if (!selectedSession) { setDanmakuComments([]); setDanmakuViewers([]); return; }
+    const loadDanmaku = async () => {
+      try {
+        const r = await fetch(`/api/monitor/session/${selectedSession.id}/danmaku`);
+        const data = await r.json();
+        setDanmakuComments(data.comments || []);
+        setDanmakuViewers(data.viewers || []);
+        setDanmakuLive(data.live || false);
+      } catch {}
+    };
+    loadDanmaku();
+    // 如果是录制中，每15秒刷新弹幕
+    if (selectedSession.status === 'recording') {
+      const timer = setInterval(loadDanmaku, 15000);
+      return () => clearInterval(timer);
+    }
+  }, [selectedSession?.id]);
+
+  // 删除场次
+  const [deletingId, setDeletingId] = useState<number | null>(null);
+  const deleteSession = async (session: LiveSession, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!window.confirm(`确定要删除「${getSessionTimes(session).start}」的录制吗？\n视频和文字稿将一同删除，此操作不可恢复。`)) return;
+    setDeletingId(session.id);
+    try {
+      const res = await fetch(`/api/monitor/session/${session.id}`, { method: 'DELETE' });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || '删除失败');
+      }
+      setSessions(prev => prev.filter(s => s.id !== session.id));
+    } catch (err: any) {
+      alert(`❌ 删除失败: ${err.message}`);
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  // 手动停止录制，触发上传→ASR流程，并停止后续自动录制
+  const [stoppingId, setStoppingId] = useState<number | null>(null);
+  const stopSession = async (session: LiveSession, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!window.confirm(`确定要切片吗？\n当前录制段将停止并开始质检流程，系统会自动开始录制下一段。`)) return;
+    setStoppingId(session.id);
+    try {
+      // 调用 stop（仅切片）：停止当前段，后台自动接力录下一段
+      const res = await fetch(`/api/monitor/session/${session.id}/stop`, { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || '停止失败');
+      // 刷新列表状态
+      setSessions(prev => prev.map(s => s.id === session.id ? { ...s, status: 'uploading' } : s));
+    } catch (err: any) {
+      alert(`❌ 停止失败: ${err.message}`);
+    } finally {
+      setStoppingId(null);
+    }
+  };
+
+  // 彻底停止录制并挂起主播
+  const stopSessionAndAnchor = async (session: LiveSession, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!window.confirm('确定要彻底结束这场评测吗？\n当前的录制将去跑质检，并且【关闭该主播的自动监控】，直到您在主播管理里重新开启！')) return;
+    setStoppingId(session.id);
+    try {
+      const res = await fetch(`/api/monitor/session/${session.id}/stop-anchor`, { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || '操作失败');
+      setSessions(prev => prev.map(s => s.id === session.id ? { ...s, status: 'uploading' } : s));
+      alert('已停止录制并挂起该主播的监控。如需恢复，请前往主播管理页面开启。');
+    } catch (err: any) {
+      alert(`操作失败: ${err.message}`);
+    } finally {
+      setStoppingId(null);
+    }
+  };
+
+  // 解析带时间戳的文字稿
+  const parseTimestampedText = (jsonStr: string): TranscriptSegment[] => {
+    try {
+      const parsed = JSON.parse(jsonStr);
+      if (!Array.isArray(parsed)) return [];
+      const toSec = (v: number) => (v || 0) / 1000;
+      const raw = parsed.map((s: any) => ({
+        start: toSec(s.start_time != null ? s.start_time : s.start),
+        end: toSec(s.end_time != null ? s.end_time : s.end),
+        text: (s.text || s.content || '').trim()
+      })).filter((s: TranscriptSegment) => s.text);
+
+      // 每30秒合并
+      const MERGE_SEC = 30;
+      const merged: TranscriptSegment[] = [];
+      let group: TranscriptSegment | null = null;
+      for (const seg of raw) {
+        if (!group || seg.start - group.start >= MERGE_SEC) {
+          group = { start: seg.start, end: seg.end, text: seg.text };
+          merged.push(group);
+        } else {
+          group.end = seg.end;
+          group.text += seg.text;
+        }
+      }
+      return merged;
+    } catch {
+      return [];
+    }
+  };
+
+  // 格式化时间
+  const formatTime = (sec: number) => {
+    if (!sec || isNaN(sec)) return '0:00';
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = Math.floor(sec % 60);
+    if (h > 0) return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+    return `${m}:${s.toString().padStart(2, '0')}`;
+  };
+
+  // 格式化时长
+  const formatDuration = (sec: number) => {
+    if (!sec) return '--';
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    if (h > 0) return `${h}小时${m}分`;
+    return `${m}分钟`;
+  };
+
+  // 解析日期时间（数据库存的已经是北京时间，直接解析即可）
+  const parseUTCDate = (dateStr: string) => {
+    if (!dateStr) return null;
+    const s = dateStr.trim().replace(' ', 'T');
+    // 数据库存的是北京时间，不加 Z，直接当本地时间解析
+    return new Date(s);
+  };
+
+  const toBeijingTime = (dateStr: string, format: 'datetime' | 'time' | 'date' = 'datetime') => {
+    try {
+      const d = parseUTCDate(dateStr);
+      if (!d || isNaN(d.getTime())) return dateStr;
+      if (format === 'time') return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+      if (format === 'date') return d.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' });
+      return d.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+    } catch { return dateStr; }
+  };
+
+  // 计算开播和结束时间
+  const getSessionTimes = (session: LiveSession) => {
+    const startStr = session.created_at || session.live_date;
+    const startD = parseUTCDate(startStr);
+    const start = toBeijingTime(startStr, 'time');
+    const startDate = toBeijingTime(startStr, 'date');
+    if (session.duration_seconds && session.duration_seconds > 0 && startD) {
+      try {
+        const endDate = new Date(startD.getTime() + session.duration_seconds * 1000);
+        const end = endDate.toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit' });
+        return { startDate, start, end, duration: formatDuration(session.duration_seconds), startMs: startD.getTime() };
+      } catch {}
+    }
+    return { startDate, start, end: null, duration: formatDuration(session.duration_seconds), startMs: startD?.getTime() || 0 };
+  };
+
+  // 正在录制的场次：动态计算已录时长
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  // 视频时间更新 → 同步字幕高亮
+  const onTimeUpdate = () => {
+    const v = videoRef.current;
+    if (!v) return;
+    setCurrentTime(v.currentTime);
+    // 找到当前时间对应的段落
+    let found = -1;
+    for (let i = segments.length - 1; i >= 0; i--) {
+      if (v.currentTime >= segments[i].start) { found = i; break; }
+    }
+    if (found >= 0 && found !== activeSegIndex) {
+      setActiveSegIndex(found);
+      // 滚动到对应位置
+      const el = segRefs.current[found];
+      const container = transcriptRef.current;
+      if (el && container) {
+        const elRect = el.getBoundingClientRect();
+        const containerRect = container.getBoundingClientRect();
+        const isVisible = elRect.top >= containerRect.top && elRect.bottom <= containerRect.bottom;
+        if (!isVisible) {
+          container.scrollTo({
+            top: elRect.top - containerRect.top + container.scrollTop - 16,
+            behavior: 'smooth'
+          });
+        }
+      }
+    }
+  };
+
+  // 点击字幕跳转视频
+  const seekTo = (time: number) => {
+    const v = videoRef.current;
+    if (v) {
+      v.currentTime = time;
+      if (v.paused) { v.play().catch(() => {}); setIsPlaying(true); }
+    }
+  };
+
+  // 搜索过滤
+  const searchMatchIndexes = searchQuery.trim()
+    ? segments.map((s, i) => s.text.toLowerCase().includes(searchQuery.toLowerCase()) ? i : -1).filter(i => i >= 0)
+    : [];
+  const searchMatchSet = new Set(searchMatchIndexes);
+
+  // 高亮搜索词
+  const highlightSearch = (text: string) => {
+    if (!searchQuery.trim()) return text;
+    const regex = new RegExp(`(${searchQuery.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi');
+    return text.replace(regex, '<mark style="background:#fef08a;color:#92400e;border-radius:2px;padding:0 2px">$1</mark>');
+  };
+
+  // 状态标签
+  const statusBadge = (status: string) => {
+    const map: Record<string, { cls: string; label: string }> = {
+      'completed': { cls: 'bg-green-100 text-green-700', label: '已完成' },
+      'done': { cls: 'bg-green-100 text-green-700', label: '已完成' },
+      'transcribed': { cls: 'bg-[rgba(7,193,96,0.1)] text-[#06AD56]', label: '已转录' },
+      'recording': { cls: 'bg-red-100 text-red-700', label: '录制中' },
+      'transcribing': { cls: 'bg-amber-100 text-amber-700', label: '转录中' },
+      'uploading': { cls: 'bg-[rgba(7,193,96,0.1)] text-[#06AD56]', label: '上传中' },
+      'extracting': { cls: 'bg-[rgba(7,193,96,0.1)] text-[#06AD56]', label: '处理中' },
+      'error': { cls: 'bg-red-100 text-red-600', label: '失败' },
+    };
+    const m = map[status] || { cls: 'bg-[#F7F7F7] text-slate-500', label: status };
+    return <span className={`px-2 py-0.5 text-[10px] font-bold rounded-full ${m.cls}`}>{m.label}</span>;
+  };
+  // ====== AI 分析报告视图 ======
+  if (viewingAnalysis) {
+    const tt = getSessionTimes(viewingAnalysis.session);
+    return (
+      <AnalysisReportView
+        sessionId={viewingAnalysis.session.id}
+        anchorName={anchor.name}
+        sessionTitle={viewingAnalysis.session.title || ''}
+        sessionTime={viewingAnalysis.time}
+        onBack={() => { setViewingAnalysis(null); onDetailChange?.(false); }}
+      />
+    );
+  }
+
+  // ====== 场次详情视图（视频 + 逐字稿） ======
+  if (selectedSession) {
+    return (
+      <div className="h-screen flex flex-col bg-[#F7F7F7] overflow-hidden">
+        {/* 顶部栏 */}
+        <div className={`bg-white border-b border-slate-100 shadow-sm shrink-0 z-10 ${isMobile ? 'px-2 py-1.5' : 'px-4 py-2'}`}>
+          {/* 第一行：返回 + 标题 */}
+          <div className="flex items-center gap-2 md:gap-3">
+            <button onClick={() => { setSelectedSession(null); onDetailChange?.(false); }} className="flex items-center gap-1 px-2 py-1.5 rounded-lg hover:bg-[#F7F7F7] transition-colors shrink-0">
+              <ArrowLeft size={isMobile ? 16 : 14} className="text-slate-500" />
+              {!isMobile && <span className="text-sm font-bold text-[#07C160]">全场回看</span>}
+            </button>
+            {!isMobile && <span className="text-slate-200">|</span>}
+            <p className="flex-1 min-w-0 text-sm text-slate-600 truncate">
+              <span className="font-bold text-slate-800">{selectedSession.title || '直播回放'}</span>
+              <span className="text-slate-300 mx-1.5">·</span>
+              <span className="text-xs text-slate-400">
+                {(() => {
+                  const t = getSessionTimes(selectedSession);
+                  if (selectedSession.status === 'recording') {
+                    const elapsed = Math.floor((now - (parseUTCDate(selectedSession.created_at || selectedSession.live_date)?.getTime() || now)) / 1000);
+                    return `🔴 录制中 · ${t.start}开播 · 已录${formatDuration(elapsed)}`;
+                  }
+                  return `${t.startDate} ${t.start}${t.end ? ` - ${t.end}` : ''} · ${t.duration}`;
+                })()}
+              </span>
+            </p>
+            {/* PC端搜索 */}
+            {!isMobile && (
+              <div className="flex items-center gap-1 bg-[#F7F7F7] rounded-full px-3 py-1.5 border border-slate-200 max-w-[200px]">
+                <Search size={12} className="text-slate-400 shrink-0" />
+                <input
+                  value={searchQuery}
+                  onChange={e => { setSearchQuery(e.target.value); setSearchNavIndex(0); }}
+                  placeholder="搜索..."
+                  className="bg-transparent border-none outline-none text-xs text-slate-600 w-full"
+                />
+                {searchQuery && (
+                  <>
+                    <span className="text-[10px] text-emerald-600 font-bold whitespace-nowrap">{searchMatchIndexes.length > 0 ? `${searchNavIndex + 1}/${searchMatchIndexes.length}` : '0'}</span>
+                    <button onClick={() => {
+                      if (searchMatchIndexes.length === 0) return;
+                      const next = (searchNavIndex - 1 + searchMatchIndexes.length) % searchMatchIndexes.length;
+                      setSearchNavIndex(next);
+                      const el = segRefs.current[searchMatchIndexes[next]];
+                      el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    }} className="text-slate-400 hover:text-slate-600 shrink-0"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="18 15 12 9 6 15"/></svg></button>
+                    <button onClick={() => {
+                      if (searchMatchIndexes.length === 0) return;
+                      const next = (searchNavIndex + 1) % searchMatchIndexes.length;
+                      setSearchNavIndex(next);
+                      const el = segRefs.current[searchMatchIndexes[next]];
+                      el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    }} className="text-slate-400 hover:text-slate-600 shrink-0"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="6 9 12 15 18 9"/></svg></button>
+                    <button onClick={() => { setSearchQuery(''); setSearchNavIndex(0); }} className="text-slate-400 hover:text-slate-600 shrink-0"><X size={12} /></button>
+                  </>
+                )}
+              </div>
+            )}
+            {/* AI 分析按钮（跟踪模式 + 已完成场次） */}
+            {isTracking && selectedSession.status === 'done' && selectedSession.duration_seconds > 60 && (() => {
+              const st = analysisStatus[selectedSession.id];
+              if (st === 'done') return (
+                <button
+                  onClick={() => {
+                    const tt = getSessionTimes(selectedSession);
+                    setViewingAnalysis({ session: selectedSession, time: `${tt.startDate} ${tt.start}${tt.end ? ` - ${tt.end}` : ''} · ${tt.duration}` });
+                  }}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-[#07C160] text-white text-[11px] font-bold rounded-lg hover:bg-[#06AD56] transition-colors shadow-sm shrink-0"
+                >
+                  <Sparkles size={12} />
+                  {isMobile ? '分析' : '查看分析'}
+                </button>
+              );
+              if (st === 'analyzing') return (
+                <span className="flex items-center gap-1 px-3 py-1.5 bg-slate-100 text-slate-500 text-[11px] font-bold rounded-lg shrink-0">
+                  <Loader2 size={12} className="animate-spin" />
+                  {isMobile ? '分析中' : 'AI分析中...'}
+                </span>
+              );
+              return (
+                <button
+                  onClick={async () => {
+                    await fetch('/api/analysis/trigger', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ session_id: selectedSession.id, anchor_name: anchor.name })
+                    });
+                    setAnalysisStatus(prev => ({ ...prev, [selectedSession.id]: 'analyzing' }));
+                  }}
+                  className="flex items-center gap-1 px-3 py-1.5 bg-gradient-to-r from-[#07C160] to-[#2BD47D] text-white text-[11px] font-bold rounded-lg hover:shadow-md transition-all shrink-0"
+                >
+                  <Sparkles size={12} />
+                  AI分析
+                </button>
+              );
+            })()}
+          </div>
+          {/* 移动端第二行：搜索 */}
+          {isMobile && (
+            <div className="flex items-center gap-1 bg-[#F7F7F7] rounded-full px-3 py-1.5 border border-slate-200 mt-1.5">
+              <Search size={12} className="text-slate-400 shrink-0" />
+              <input
+                value={searchQuery}
+                onChange={e => { setSearchQuery(e.target.value); setSearchNavIndex(0); }}
+                placeholder="搜索逐字稿..."
+                className="bg-transparent border-none outline-none text-xs text-slate-600 flex-1 min-w-0"
+              />
+              {searchQuery && (
+                <>
+                  <span className="text-[10px] text-emerald-600 font-bold whitespace-nowrap">{searchMatchIndexes.length > 0 ? `${searchNavIndex + 1}/${searchMatchIndexes.length}` : '0'}</span>
+                  <button onClick={() => {
+                    if (searchMatchIndexes.length === 0) return;
+                    const next = (searchNavIndex - 1 + searchMatchIndexes.length) % searchMatchIndexes.length;
+                    setSearchNavIndex(next);
+                    const el = segRefs.current[searchMatchIndexes[next]];
+                    el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                  }} className="text-slate-400 hover:text-slate-600 shrink-0"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="18 15 12 9 6 15"/></svg></button>
+                  <button onClick={() => {
+                    if (searchMatchIndexes.length === 0) return;
+                    const next = (searchNavIndex + 1) % searchMatchIndexes.length;
+                    setSearchNavIndex(next);
+                    const el = segRefs.current[searchMatchIndexes[next]];
+                    el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                  }} className="text-slate-400 hover:text-slate-600 shrink-0"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="6 9 12 15 18 9"/></svg></button>
+                  <button onClick={() => { setSearchQuery(''); setSearchNavIndex(0); }} className="text-slate-400 hover:text-slate-600 shrink-0"><X size={12} /></button>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* 主体 */}
+        {isMobile ? (
+          /* ====== 移动端：视频 + 在线人数（常驻）+ 逐字稿/弹幕 ====== */
+          <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+            {/* 视频区 */}
+            {selectedSession.video_cos_url && showMobileVideo && (
+              <div className="bg-black shrink-0" style={{ maxHeight: '40vh' }}>
+                <video
+                  ref={videoRef}
+                  src={selectedSession.video_cos_url}
+                  className="w-full" style={{ maxHeight: '40vh', objectFit: 'contain' }}
+                  controls playsInline preload="auto"
+                  onTimeUpdate={onTimeUpdate}
+                  onLoadedMetadata={() => { if (videoRef.current) setDuration(videoRef.current.duration); setVideoLoading(false); setVideoReady(true); }}
+                  onCanPlay={() => { setVideoReady(true); setVideoLoading(false); setBuffering(false); }}
+                  onWaiting={() => setBuffering(true)}
+                  onPlaying={() => { setBuffering(false); setIsPlaying(true); }}
+                  onPlay={() => setIsPlaying(true)}
+                  onPause={() => setIsPlaying(false)}
+                  onError={() => { setVideoError('视频加载失败'); setVideoLoading(false); }}
+                />
+              </div>
+            )}
+            {/* 迷你播放条（收起时显示） */}
+            {selectedSession.video_cos_url && !showMobileVideo && (
+              <div className="flex items-center gap-2 px-3 py-2 bg-white border-b border-slate-100 shrink-0">
+                <button onClick={() => { const v = videoRef.current; if (v) { v.paused ? v.play() : v.pause(); } }} className="text-[#07C160] font-bold text-lg">{isPlaying ? '⏸' : '▶'}</button>
+                <div className="flex-1 h-1 bg-slate-200 rounded-full relative">
+                  <div className="h-full bg-[#07C160] rounded-full" style={{ width: `${duration ? (currentTime / duration) * 100 : 0}%` }} />
+                </div>
+                <span className="text-[10px] text-slate-400 font-mono whitespace-nowrap">{formatTime(currentTime)}/{formatTime(duration)}</span>
+                <button onClick={() => setShowMobileVideo(true)} className="text-slate-400 text-xs font-bold">📺</button>
+              </div>
+            )}
+            {/* 视频收起/展开按钮 */}
+            {selectedSession.video_cos_url && (
+              <button onClick={() => setShowMobileVideo(!showMobileVideo)} className="w-full py-1.5 bg-slate-50 border-b border-slate-100 text-xs text-slate-400 font-bold shrink-0">
+                {showMobileVideo ? '收起视频 ▲' : '展开视频 ▼'}
+              </button>
+            )}
+            {/* 无视频提示 */}
+            {!selectedSession.video_cos_url && (
+              <div className="py-3 text-center text-xs text-slate-400 bg-slate-50 border-b border-slate-100 shrink-0">
+                {selectedSession.status === 'recording' ? '🔴 正在录制中...' : '📹 视频处理中'}
+              </div>
+            )}
+
+            {/* ===== 在线人数折线图：始终显示 ===== */}
+            {danmakuViewers.length > 1 && (
+              <div className="shrink-0 border-b border-slate-100 bg-white">
+                <div className="flex items-center gap-1.5 px-3 pt-2 pb-1">
+                  <Users size={11} className="text-[#07C160]" />
+                  <span className="text-[10px] font-bold text-slate-600">在线人数</span>
+                  <span className="ml-auto text-[10px] text-slate-400">峰值 {Math.max(...danmakuViewers.map(v => v.c)).toLocaleString()}</span>
+                </div>
+                <ViewerChart
+                  viewers={danmakuViewers}
+                  currentTime={currentTime}
+                  sessionStartTs={parseUTCDate(selectedSession.created_at || selectedSession.live_date)?.getTime() || 0}
+                  onSeek={seekTo}
+                  isMobile={true}
+                />
+              </div>
+            )}
+
+            {/* Tab 切换：逐字稿 | 弹幕 */}
+            <div className="flex items-center border-b border-slate-100 bg-white shrink-0 px-2">
+              <button onClick={() => setRightTab('transcript')} className={`px-3 py-2 text-xs font-bold flex items-center gap-1 border-b-2 transition-all ${rightTab === 'transcript' ? 'text-[#07C160] border-[#07C160]' : 'text-slate-400 border-transparent'}`}>
+                <FileText size={12} />逐字稿
+              </button>
+              <button onClick={() => setRightTab('danmaku')} className={`px-3 py-2 text-xs font-bold flex items-center gap-1 border-b-2 transition-all ${rightTab === 'danmaku' ? 'text-[#07C160] border-[#07C160]' : 'text-slate-400 border-transparent'}`}>
+                <MessageCircle size={12} />弹幕{danmakuComments.length > 0 && <span className="text-[9px] bg-slate-100 text-slate-500 rounded-full px-1.5">{danmakuComments.length}</span>}
+              </button>
+            </div>
+
+            {/* 内容区（逐字稿 or 弹幕，均随进度滚动） */}
+            {rightTab === 'transcript' ? (
+              <div ref={transcriptRef} className="flex-1 overflow-y-auto bg-white min-h-0">
+                {segments.length === 0 ? (
+                  <div className="flex items-center justify-center h-full text-slate-400 text-sm py-20">
+                    {selectedSession.status === 'transcribing' ? '🔄 正在转录中...' : '暂无逐字稿'}
+                  </div>
+                ) : (
+                  <div>
+                    {segments.map((seg, idx) => (
+                      <div
+                        key={idx}
+                        ref={el => { segRefs.current[idx] = el; }}
+                        className={`flex gap-3 px-3 py-2.5 cursor-pointer border-l-[3px] transition-colors border-b border-slate-50 ${
+                          idx === activeSegIndex
+                            ? 'bg-[rgba(7,193,96,0.06)] border-l-[#07C160]'
+                            : searchMatchSet.has(idx)
+                            ? 'bg-amber-50 border-l-transparent'
+                            : 'border-l-transparent active:bg-slate-50'
+                        }`}
+                        onClick={() => seekTo(seg.start)}
+                      >
+                        <span className="text-[11px] text-[#07C160] font-mono font-bold whitespace-nowrap pt-0.5 min-w-[36px]">{formatTime(seg.start)}</span>
+                        <p className={`text-[13px] leading-relaxed ${idx === activeSegIndex ? 'text-slate-900 font-medium' : 'text-slate-600'}`}
+                          dangerouslySetInnerHTML={{ __html: highlightSearch(seg.text) }} />
+                      </div>
+                    ))}
+                    <div className="h-20" />
+                  </div>
+                )}
+              </div>
+            ) : (
+              <DanmakuList comments={danmakuComments} currentTime={currentTime} sessionStartTs={parseUTCDate(selectedSession.created_at || selectedSession.live_date)?.getTime() || 0} onSeek={seekTo} scrollRef={danmakuScrollRef} />
+            )}
+          </div>
+        ) : (
+          /* ====== 桌面端：视频 | 逐字稿 | 弹幕+在线人数 三列 ====== */
+        <div ref={layoutRef} className="flex-1 flex min-h-0">
+          {/* 列 1：视频 */}
+          <div style={{ width: `${videoPct}%` }} className="bg-slate-900 shrink-0 overflow-hidden flex flex-col">
+            {selectedSession.video_cos_url ? (
+              <>
+                <div className="relative flex-1 min-h-0 flex items-center justify-center">
+                  <video
+                    ref={videoRef}
+                    src={selectedSession.video_cos_url}
+                    className="w-full h-full"
+                    style={{ objectFit: 'contain' }}
+                    controls
+                    preload="auto"
+                    onTimeUpdate={onTimeUpdate}
+                    onLoadedMetadata={() => {
+                      if (videoRef.current) setDuration(videoRef.current.duration);
+                      setVideoLoading(false);
+                      setVideoReady(true);
+                    }}
+                    onCanPlay={() => { setVideoReady(true); setVideoLoading(false); setBuffering(false); }}
+                    onWaiting={() => setBuffering(true)}
+                    onPlaying={() => { setBuffering(false); setIsPlaying(true); }}
+                    onPlay={() => setIsPlaying(true)}
+                    onPause={() => setIsPlaying(false)}
+                    onError={(e) => {
+                      const video = e.currentTarget;
+                      const err = video.error;
+                      let msg = '视频加载失败';
+                      if (err) {
+                        if (err.code === 1) msg = '视频加载被中断';
+                        else if (err.code === 2) msg = '网络错误，请检查网络连接';
+                        else if (err.code === 3) msg = '视频解码失败，格式可能不支持';
+                        else if (err.code === 4) msg = '视频源不可用';
+                      }
+                      setVideoError(msg);
+                      setVideoLoading(false);
+                    }}
+                  />
+                  {videoLoading && !videoError && !videoReady && (
+                    <div className="absolute inset-3 flex flex-col items-center justify-center bg-slate-900/80 rounded-lg">
+                      <Loader2 size={36} className="text-blue-400 animate-spin mb-3" />
+                      <p className="text-sm text-slate-300 font-bold">视频加载中...</p>
+                      <p className="text-[10px] text-slate-500 mt-1">
+                        {selectedSession.duration_seconds > 3600 ? '较大文件，首次加载可能需要 10-30 秒' : '请稍候'}
+                      </p>
+                    </div>
+                  )}
+                  {buffering && !videoLoading && (
+                    <div className="absolute top-6 left-6 right-6 flex items-center justify-center">
+                      <div className="bg-black/70 rounded-full px-4 py-2 flex items-center gap-2">
+                        <Loader2 size={14} className="text-white animate-spin" />
+                        <span className="text-xs text-white font-medium">缓冲中...</span>
+                      </div>
+                    </div>
+                  )}
+                  {videoError && (
+                    <div className="absolute inset-3 flex flex-col items-center justify-center bg-slate-900/90 rounded-lg">
+                      <AlertTriangle size={32} className="text-red-400 mb-3" />
+                      <p className="text-sm text-red-300 font-bold mb-1">{videoError}</p>
+                      <p className="text-[10px] text-slate-500 mb-3">可能是网络问题或视频文件异常</p>
+                      <button onClick={retryVideo} className="px-4 py-2 bg-[#07C160] text-white text-xs font-bold rounded-lg transition-colors">重新加载</button>
+                    </div>
+                  )}
+                </div>
+              </>
+            ) : (
+              <div className="flex-1 flex items-center justify-center text-slate-400">
+                <div className="text-center">
+                  {selectedSession.status === 'recording' ? (
+                    <>
+                      <div className="w-16 h-16 mx-auto mb-4 bg-red-500/20 rounded-full flex items-center justify-center">
+                        <div className="w-4 h-4 bg-red-500 rounded-full animate-pulse" />
+                      </div>
+                      <p className="text-sm font-bold text-red-400 mb-1">🔴 正在录制中</p>
+                      <p className="text-xs text-slate-500">
+                        {getSessionTimes(selectedSession).start} 开播 · 已录制 {formatDuration(Math.floor((now - (parseUTCDate(selectedSession.created_at || selectedSession.live_date)?.getTime() || now)) / 1000))}
+                      </p>
+                      <p className="text-[10px] text-slate-600 mt-2">直播结束后自动生成回放视频</p>
+                    </>
+                  ) : (
+                    <>
+                      <Video size={40} className="mx-auto mb-3 opacity-30" />
+                      <p className="text-sm">视频处理中...</p>
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* 分割线 1：视频 ↔ 逐字稿 */}
+          <div
+            onMouseDown={handleDragStart('video')}
+            className="w-[5px] shrink-0 cursor-col-resize bg-slate-200 hover:bg-[#07C160] active:bg-[#07C160] transition-colors relative group"
+            title="拖拽调整宽度"
+          >
+            <div className="absolute inset-y-0 -left-1 -right-1" />
+            <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-1 h-8 rounded-full bg-slate-400 group-hover:bg-white transition-colors" />
+          </div>
+
+          {/* 列 2：逐字稿（随播放时间自动滚动+高亮） */}
+          <div style={{ width: `${transcriptPct}%` }} className="shrink-0 flex flex-col overflow-hidden bg-white border-r border-slate-100">
+            {/* 列头 */}
+            <div className="flex items-center gap-2 px-4 py-2.5 border-b border-slate-100 shrink-0 bg-white">
+              <FileText size={13} className="text-[#07C160]" />
+              <span className="text-xs font-bold text-slate-700">逐字稿</span>
+              {segments.length > 0 && (
+                <span className="ml-auto text-[10px] text-slate-400">{segments.length} 段</span>
+              )}
+            </div>
+            {/* 内容 */}
+            <div ref={transcriptRef} className="flex-1 overflow-y-auto min-h-0">
+              {segments.length === 0 ? (
+                <div className="flex items-center justify-center h-full text-slate-400 text-sm">
+                  {selectedSession.status === 'transcribing' ? '🔄 正在转录中...' : '暂无逐字稿'}
+                </div>
+              ) : (
+                <div>
+                  {segments.map((seg, idx) => (
+                    <div
+                      key={idx}
+                      ref={el => { segRefs.current[idx] = el; }}
+                      className={`flex gap-3 px-4 py-3 cursor-pointer border-l-[3px] transition-colors border-b border-slate-50 ${
+                        idx === activeSegIndex
+                          ? 'bg-[rgba(7,193,96,0.06)] border-l-[#07C160]'
+                          : searchMatchSet.has(idx)
+                          ? 'bg-amber-50 border-l-transparent'
+                          : 'hover:bg-[#F7F7F7] border-l-transparent'
+                      }`}
+                      onClick={() => seekTo(seg.start)}
+                    >
+                      <span className="text-[11px] text-[#07C160] font-mono font-bold whitespace-nowrap pt-0.5 min-w-[40px]">
+                        {formatTime(seg.start)}
+                      </span>
+                      <p
+                        className={`text-sm leading-relaxed ${idx === activeSegIndex ? 'text-slate-900 font-medium' : 'text-slate-600'}`}
+                        dangerouslySetInnerHTML={{ __html: highlightSearch(seg.text) }}
+                      />
+                    </div>
+                  ))}
+                  <div className="h-20" />
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* 分割线 2：逐字稿 ↔ 弹幕 */}
+          <div
+            onMouseDown={handleDragStart('transcript')}
+            className="w-[5px] shrink-0 cursor-col-resize bg-slate-200 hover:bg-[#07C160] active:bg-[#07C160] transition-colors relative group"
+            title="拖拽调整宽度"
+          >
+            <div className="absolute inset-y-0 -left-1 -right-1" />
+            <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-1 h-8 rounded-full bg-slate-400 group-hover:bg-white transition-colors" />
+          </div>
+
+          {/* 列 3：在线人数图表（固定顶部）+ 弹幕列表（随时间滚动） */}
+          <div className="flex-1 flex flex-col overflow-hidden bg-white min-w-0">
+            {/* 列头：实时在线数据 */}
+            <div className="flex items-center gap-2 px-3 py-2.5 border-b border-slate-100 shrink-0 bg-white">
+              <Users size={13} className="text-[#07C160]" />
+              <span className="text-xs font-bold text-slate-700">弹幕 & 在线人数</span>
+              {danmakuViewers.length > 0 && (
+                <div className="ml-auto flex items-center gap-1.5 text-[10px] text-slate-400">
+                  <span>峰值 {Math.max(...danmakuViewers.map(v => v.c)).toLocaleString()}</span>
+                  {danmakuComments.length > 0 && (
+                    <><span className="text-slate-200">·</span><span>{danmakuComments.length} 条弹幕</span></>
+                  )}
+                </div>
+              )}
+            </div>
+            {/* 在线人数折线图：始终显示在顶部 */}
+            {danmakuViewers.length > 1 && (
+              <ViewerChart
+                viewers={danmakuViewers}
+                currentTime={currentTime}
+                sessionStartTs={parseUTCDate(selectedSession.created_at || selectedSession.live_date)?.getTime() || 0}
+                onSeek={seekTo}
+                isMobile={false}
+              />
+            )}
+            {/* 弹幕列表：随 currentTime 自动滚动 */}
+            <DanmakuList
+              comments={danmakuComments}
+              currentTime={currentTime}
+              sessionStartTs={parseUTCDate(selectedSession.created_at || selectedSession.live_date)?.getTime() || 0}
+              onSeek={seekTo}
+              scrollRef={danmakuScrollRef}
+            />
+          </div>
+        </div>
+        )}
+      </div>
+    );
+  }
+
+  // ====== 场次列表视图 ======
+  return (
+    <div className="h-full flex flex-col bg-[#F7F7F7] overflow-x-hidden">
+      {/* 列表顶部导航栏（主播培训端 readOnly 模式） */}
+      {readOnly && (
+        <div className="bg-white border-b border-slate-100 shadow-sm shrink-0 px-4 py-3 flex items-center gap-3">
+          <button onClick={onBack} className="flex items-center gap-1.5 px-2 py-1.5 rounded-lg hover:bg-[#F7F7F7] transition-colors">
+            <ArrowLeft size={16} className="text-slate-500" />
+            <span className="text-sm font-bold text-[#07C160]">返回</span>
+          </button>
+          <span className="text-slate-200">|</span>
+          <div className="flex items-center gap-2 min-w-0">
+            <div className="w-7 h-7 rounded-full flex items-center justify-center text-white font-bold text-xs shrink-0" style={{ background: anchor.color || '#07C160' }}>
+              {anchor.name.charAt(0)}
+            </div>
+            <span className="text-sm font-bold text-slate-800 truncate">{anchor.name}</span>
+            <span className="text-xs text-slate-400">· 全场回看</span>
+          </div>
+        </div>
+      )}
+      {/* 空状态 / 加载中 / 列表 */}
+      {loading ? (
+        <div className="flex-1 flex items-center justify-center">
+          <Loader2 size={28} className="text-[#07C160] animate-spin" />
+        </div>
+      ) : error ? (
+        <div className="p-6">
+          <div className="bg-red-50 border border-red-100 rounded-xl p-4 flex items-start gap-2">
+            <AlertTriangle size={14} className="text-red-500 shrink-0 mt-0.5" />
+            <p className="text-xs text-red-600">{error}</p>
+          </div>
+        </div>
+      ) : sessions.length === 0 ? (
+        <div className="flex-1 flex flex-col items-center justify-center gap-4 text-slate-400 p-8">
+          <Monitor size={48} className="opacity-20" />
+          <div className="text-center">
+            <p className="text-sm font-medium mb-1">暂无直播录制记录</p>
+            <p className="text-xs">请先在主播管理中配置抖音直播间链接，<br/>系统将自动监控并录制直播</p>
+          </div>
+        </div>
+      ) : (
+        <div className="flex-1 overflow-y-auto p-3 md:p-4 space-y-4 md:space-y-5">
+          <div className="max-w-full md:max-w-[900px] mx-auto">
+          {(() => {
+            // 按日期分组
+            const groups: Record<string, LiveSession[]> = {};
+            sessions.forEach(s => {
+              const dateKey = toBeijingTime(s.created_at || s.live_date, 'date');
+              if (!groups[dateKey]) groups[dateKey] = [];
+              groups[dateKey].push(s);
+            });
+            const weekDays = ['周日','周一','周二','周三','周四','周五','周六'];
+            return Object.entries(groups).map(([dateStr, dateSessions]) => {
+              const d = parseUTCDate(dateSessions[0].created_at || dateSessions[0].live_date);
+              const weekDay = d ? weekDays[d.getDay()] : '';
+              return (
+                <div key={dateStr}>
+                  {/* 日期大标题 */}
+                  <div className="flex items-center gap-3 mb-2.5 px-1">
+                    <h2 className="text-base font-black text-slate-800">{dateStr} {weekDay}</h2>
+                    <span className="text-[11px] text-slate-400 font-medium">{dateSessions.length} 场</span>
+                    <div className="flex-1 h-px bg-slate-200" />
+                  </div>
+                  {/* 该日期下的场次 */}
+                  <div className="space-y-2">
+                    {dateSessions.map((session, idx) => {
+                      const t = getSessionTimes(session);
+                      const isRecording = session.status === 'recording';
+                      const elapsed = isRecording ? Math.floor((now - (t.startMs || now)) / 1000) : 0;
+                      return (
+                        <div
+                          key={session.id}
+                          onClick={() => selectSession(session)}
+                          className={`bg-white rounded-xl border ${isMobile ? 'p-3' : 'p-4'} hover:shadow-md transition-all cursor-pointer group ${isRecording ? 'border-red-200 shadow-sm' : 'border-slate-100 hover:border-blue-200'}`}
+                        >
+                          <div className={`flex items-center ${isMobile ? 'gap-2.5' : 'gap-4'}`}>
+                            {/* 场次序号 */}
+                            <div className={`${isMobile ? 'w-8 h-8' : 'w-10 h-10'} rounded-xl flex items-center justify-center shadow-sm shrink-0 ${isRecording ? 'bg-gradient-to-br from-red-500 to-red-600' : 'bg-gradient-to-br from-[#2BD47D] to-[#06AD56]'}`}>
+                              {isRecording 
+                                ? <div className="w-3 h-3 bg-white rounded-full animate-pulse" />
+                                : <Play size={isMobile ? 13 : 16} className="text-white ml-0.5" />
+                              }
+                            </div>
+                            {/* 核心信息：时间为主 */}
+                            <div className="flex-1 min-w-0">
+                              {/* 主标题 = 时间 */}
+                              <div className="flex items-baseline gap-2">
+                                <span className="text-lg font-black text-slate-800">
+                                  {t.start}
+                                </span>
+                                {t.end && !isRecording && (
+                                  <>
+                                    <span className="text-slate-300">→</span>
+                                    <span className="text-lg font-black text-slate-800">{t.end}</span>
+                                  </>
+                                )}
+                                {isRecording && (
+                                  <span className="text-sm font-bold text-red-500 animate-pulse">录制中</span>
+                                )}
+                              </div>
+                              {/* 副标题 = ID + 时长 + 标题 */}
+                              <div className="flex items-center gap-2 mt-0.5">
+                                <span className="text-[10px] text-slate-300 font-mono">#{session.id}</span>
+                                {isRecording ? (
+                                  <span className="text-xs text-red-400 font-bold">已录 {formatDuration(elapsed)}</span>
+                                ) : (
+                                  <span className="text-xs text-slate-400 font-medium">{t.duration}</span>
+                                )}
+                                {session.title && (
+                                  <span className="text-xs text-slate-300 truncate">· {session.title}</span>
+                                )}
+                              </div>
+                            </div>
+                            {/* 右侧：质检 + 删除 + 状态 */}
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              {!readOnly && session.status === 'done' && session.duration_seconds > 60 && !isTracking && (
+                                <button
+                                  onClick={(e) => triggerQC(session, e)}
+                                  disabled={triggeringQC === session.id}
+                                  className="flex items-center gap-1 px-2.5 py-1 bg-emerald-50 text-emerald-600 text-[10px] font-bold rounded-lg border border-emerald-100 hover:bg-emerald-100 transition-colors disabled:opacity-50"
+                                >
+                                  {triggeringQC === session.id ? (
+                                    <Loader2 size={10} className="animate-spin" />
+                                  ) : (
+                                    <Shield size={10} />
+                                  )}
+                                  质检
+                                </button>
+                              )}
+                              {/* AI 分析按钮（跟踪模式） */}
+                              {isTracking && session.status === 'done' && session.duration_seconds > 60 && (
+                                (() => {
+                                  const st = analysisStatus[session.id];
+                                  if (st === 'done') return (
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        const tt = getSessionTimes(session);
+                                        setViewingAnalysis({ session, time: `${tt.startDate} ${tt.start}${tt.end ? ` - ${tt.end}` : ''} · ${tt.duration}` });
+                                        onDetailChange?.(true);
+                                      }}
+                                      className="flex items-center gap-1 px-2.5 py-1 bg-[rgba(7,193,96,0.08)] text-[#07C160] text-[10px] font-bold rounded-lg border border-[rgba(7,193,96,0.2)] hover:bg-[rgba(7,193,96,0.15)] transition-colors"
+                                    >
+                                      <Sparkles size={10} />
+                                      查看分析
+                                    </button>
+                                  );
+                                  if (st === 'analyzing') return (
+                                    <span className="flex items-center gap-1 px-2.5 py-1 text-[10px] font-bold text-slate-400">
+                                      <Loader2 size={10} className="animate-spin" />
+                                      分析中
+                                    </span>
+                                  );
+                                  if (st === 'failed') return (
+                                    <span className="flex items-center gap-1 px-2 py-1 text-[10px] font-bold text-red-400">
+                                      <AlertTriangle size={10} />
+                                      失败
+                                    </span>
+                                  );
+                                  return (
+                                    <button
+                                      onClick={async (e) => {
+                                        e.stopPropagation();
+                                        await fetch('/api/analysis/trigger', {
+                                          method: 'POST',
+                                          headers: { 'Content-Type': 'application/json' },
+                                          body: JSON.stringify({ session_id: session.id, anchor_name: anchor.name })
+                                        });
+                                        setAnalysisStatus(prev => ({ ...prev, [session.id]: 'analyzing' }));
+                                      }}
+                                      className="flex items-center gap-1 px-2.5 py-1 bg-slate-50 text-slate-500 text-[10px] font-bold rounded-lg border border-slate-200 hover:bg-[rgba(7,193,96,0.08)] hover:text-[#07C160] hover:border-[rgba(7,193,96,0.2)] transition-colors"
+                                    >
+                                      <Sparkles size={10} />
+                                      AI分析
+                                    </button>
+                                  );
+                                })()
+                              )}
+                              {statusBadge(session.status)}
+                              {/* ⋮ 更多菜单（只读模式下隐藏） */}
+                              {!readOnly && (
+                              <div className="relative">
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); setMenuOpenId(menuOpenId === session.id ? null : session.id); }}
+                                  className="w-7 h-7 flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-all"
+                                >
+                                  <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>
+                                </button>
+                                {menuOpenId === session.id && (
+                                  <>
+                                    <div className="fixed inset-0 z-40" onClick={(e) => { e.stopPropagation(); setMenuOpenId(null); }} />
+                                    <div className="absolute right-0 top-8 z-50 bg-white border border-slate-200 rounded-xl shadow-lg py-1 min-w-[160px]">
+                                      {session.status === 'recording' && (
+                                        <>
+                                          <button
+                                            onClick={(e) => { setMenuOpenId(null); stopSession(session, e); }}
+                                            disabled={stoppingId === session.id}
+                                            className="w-full px-4 py-2.5 flex items-center gap-2 text-sm text-blue-600 hover:bg-blue-50 transition-colors disabled:opacity-50"
+                                          >
+                                            {stoppingId === session.id ? <Loader2 size={14} className="animate-spin" /> : <span>&#x2702;&#xFE0F;</span>}
+                                            生成切片并继续录
+                                          </button>
+                                          <button
+                                            onClick={(e) => { setMenuOpenId(null); stopSessionAndAnchor(session, e); }}
+                                            disabled={stoppingId === session.id}
+                                            className="w-full px-4 py-2.5 flex items-center gap-2 text-sm text-orange-500 hover:bg-orange-50 transition-colors disabled:opacity-50"
+                                          >
+                                            {stoppingId === session.id ? <Loader2 size={14} className="animate-spin" /> : <span>&#x1F6D1;</span>}
+                                            彻底结束挂起主播
+                                          </button>
+                                        </>
+                                      )}
+                                      {/* 重新质检按钮（仅对已完成的场次显示） */}
+                                      {session.status === 'done' && (
+                                        <button
+                                          onClick={async (e) => {
+                                            e.stopPropagation();
+                                            setMenuOpenId(null);
+                                            if (!confirm('确定要对这场直播重新质检吗？将创建一条新的质检报告。')) return;
+                                            setRetryQcId(session.id);
+                                            try {
+                                              const res = await fetch(`/api/session/${session.id}/retry-qc`, {
+                                                method: 'POST',
+                                                headers: { 'Content-Type': 'application/json' },
+                                                body: JSON.stringify({ anchor_id: anchor.id })
+                                              });
+                                              const data = await res.json();
+                                              if (data.success) {
+                                                alert(`✅ 已发起重新质检！任务ID: ${data.task_id}\n逐字稿 ${data.text_length} 字，${data.is_dual ? '双轮' : '单轮'}模式`);
+                                              } else {
+                                                alert('❌ 重新质检失败: ' + (data.error || '未知错误'));
+                                              }
+                                            } catch (err: any) {
+                                              alert('❌ 请求失败: ' + err.message);
+                                            } finally {
+                                              setRetryQcId(null);
+                                            }
+                                          }}
+                                          disabled={retryQcId === session.id}
+                                          className="w-full px-4 py-2.5 flex items-center gap-2 text-sm text-[#07C160] hover:bg-[rgba(7,193,96,0.06)] transition-colors disabled:opacity-50"
+                                        >
+                                          {retryQcId === session.id ? <Loader2 size={14} className="animate-spin" /> : <span>🔄</span>}
+                                          重新质检
+                                        </button>
+                                      )}
+                                      <button
+                                        onClick={(e) => { setMenuOpenId(null); deleteSession(session, e); }}
+                                        disabled={deletingId === session.id}
+                                        className="w-full px-4 py-2.5 flex items-center gap-2 text-sm text-red-500 hover:bg-red-50 transition-colors disabled:opacity-50"
+                                      >
+                                        {deletingId === session.id ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+                                        删除录制
+                                      </button>
+                                    </div>
+                                  </>
+                                )}
+                              </div>
+                              )}
+                              <ChevronRight size={16} className="text-slate-300 group-hover:text-[#07C160] transition-colors" />
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            });
+          })()}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// 在线人数折线图组件 — 完整版（Y轴刻度 + 实时人数气泡 + hover tooltip）
+const ViewerChart: React.FC<{
+  viewers: {t: number; c: number}[];
+  currentTime: number;
+  sessionStartTs: number;
+  onSeek: (t: number) => void;
+  isMobile: boolean;
+}> = ({ viewers, currentTime, sessionStartTs, onSeek, isMobile }) => {
+  const [hoverInfo, setHoverInfo] = React.useState<{x: number; t: number; c: number} | null>(null);
+  if (viewers.length < 2) return null;
+
+  // 布局参数
+  const W = 600;
+  const H = isMobile ? 90 : 160;
+  const PAD_L = 50;  // 左侧留更多空间给 Y 轴标签
+  const PAD_R = 15;
+  const PAD_T = 20;
+  const PAD_B = 20;
+
+  const minT = viewers[0].t, maxT = viewers[viewers.length - 1].t;
+  const rawMaxC = Math.max(...viewers.map(v => v.c));
+  const rawMinC = Math.min(...viewers.map(v => v.c));
+
+  // Y 轴从 0 开始，上限留 10% 空间
+  const yMin = 0;
+  const yMax = rawMaxC * 1.1 || 10;
+
+  const rangeT = maxT - minT || 1;
+  const rangeC = yMax - yMin || 1;
+  const xScale = (t: number) => PAD_L + ((t - minT) / rangeT) * (W - PAD_L - PAD_R);
+  const yScale = (c: number) => H - PAD_B - ((c - yMin) / rangeC) * (H - PAD_T - PAD_B);
+
+  const points = viewers.map(v => `${xScale(v.t)},${yScale(v.c)}`).join(' ');
+  const areaPoints = `${xScale(minT)},${yScale(0)} ${points} ${xScale(maxT)},${yScale(0)}`;
+
+  // ===== Y 轴智能刻度 =====
+  const calcYTicks = (max: number): number[] => {
+    if (max <= 0) return [0];
+    // 计算合适的步长（1, 2, 5, 10, 20, 50, 100, 200, 500, 1000...）
+    const magnitude = Math.pow(10, Math.floor(Math.log10(max)));
+    let step: number;
+    const normalized = max / magnitude;
+    if (normalized <= 2) step = magnitude * 0.5;
+    else if (normalized <= 5) step = magnitude;
+    else step = magnitude * 2;
+    // 至少3个刻度
+    if (max / step < 3) step = step / 2;
+    const ticks: number[] = [];
+    for (let v = 0; v <= max * 1.05; v += step) {
+      ticks.push(Math.round(v));
+    }
+    return ticks;
+  };
+  const yTicks = calcYTicks(rawMaxC);
+
+  // 格式化人数
+  const fmtCount = (c: number): string => {
+    if (c >= 10000) return (c / 10000).toFixed(1) + 'w';
+    if (c >= 1000) return (c / 1000).toFixed(1) + 'k';
+    return String(Math.round(c));
+  };
+
+  // ===== X 轴刻度 =====
+  const xTicks: {t: number; label: string}[] = [];
+  const xStep = rangeT / (isMobile ? 4 : 6);
+  for (let i = 0; i <= (isMobile ? 4 : 6); i++) {
+    const t = minT + xStep * i;
+    const d = new Date(t);
+    xTicks.push({ t, label: `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}` });
+  }
+
+  // ===== 当前播放位置 =====
+  const curTs = sessionStartTs + currentTime * 1000;
+  const curXPos = xScale(Math.max(minT, Math.min(maxT, curTs)));
+  // 插值获取当前人数
+  const getCurCount = (): number => {
+    if (curTs <= viewers[0].t) return viewers[0].c;
+    if (curTs >= viewers[viewers.length - 1].t) return viewers[viewers.length - 1].c;
+    for (let i = 1; i < viewers.length; i++) {
+      if (viewers[i].t >= curTs) {
+        const prev = viewers[i - 1], next = viewers[i];
+        const ratio = (curTs - prev.t) / (next.t - prev.t);
+        return Math.round(prev.c + (next.c - prev.c) * ratio);
+      }
+    }
+    return viewers[viewers.length - 1].c;
+  };
+  const curCount = currentTime > 0 ? getCurCount() : 0;
+
+  // ===== 交互 =====
+  const handleClick = (e: React.MouseEvent<SVGSVGElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const svgX = (e.clientX - rect.left) / rect.width * W;
+    const ratio = (svgX - PAD_L) / (W - PAD_L - PAD_R);
+    if (ratio < 0 || ratio > 1) return;
+    const ts = minT + ratio * rangeT;
+    const secs = (ts - sessionStartTs) / 1000;
+    if (secs >= 0) onSeek(secs);
+  };
+
+  const handleMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const svgX = (e.clientX - rect.left) / rect.width * W;
+    const ratio = (svgX - PAD_L) / (W - PAD_L - PAD_R);
+    if (ratio < 0 || ratio > 1) { setHoverInfo(null); return; }
+    const ts = minT + ratio * rangeT;
+    // 找最近的数据点
+    let closest = viewers[0];
+    let minDist = Infinity;
+    for (const v of viewers) {
+      const d = Math.abs(v.t - ts);
+      if (d < minDist) { minDist = d; closest = v; }
+    }
+    setHoverInfo({ x: svgX, t: closest.t, c: closest.c });
+  };
+
+  return (
+    <div className={`shrink-0 bg-slate-50 border-b border-slate-100 ${isMobile ? 'px-2 py-1' : 'px-3 py-2'}`}>
+      <svg
+        viewBox={`0 0 ${W} ${H}`}
+        className="w-full cursor-crosshair select-none"
+        style={{ height: isMobile ? 90 : 160 }}
+        onClick={handleClick}
+        onMouseMove={handleMouseMove}
+        onMouseLeave={() => setHoverInfo(null)}
+      >
+        {/* Y 轴网格线 + 刻度 */}
+        {yTicks.map((v, i) => (
+          <g key={`y-${i}`}>
+            <line x1={PAD_L} y1={yScale(v)} x2={W - PAD_R} y2={yScale(v)}
+              stroke="#e2e8f0" strokeWidth="0.5" strokeDasharray={v === 0 ? '' : '4,3'} />
+            <text x={PAD_L - 6} y={yScale(v) + 3} textAnchor="end"
+              fill="#94a3b8" fontSize={isMobile ? '7' : '9'} fontFamily="system-ui">{fmtCount(v)}</text>
+          </g>
+        ))}
+
+        {/* 填充区 */}
+        <polygon points={areaPoints} fill="url(#viewerGrad)" />
+        <defs>
+          <linearGradient id="viewerGrad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#07C160" stopOpacity="0.15" />
+            <stop offset="100%" stopColor="#07C160" stopOpacity="0.02" />
+          </linearGradient>
+        </defs>
+
+        {/* 折线 */}
+        <polyline points={points} fill="none" stroke="#07C160" strokeWidth="1.8" strokeLinejoin="round" />
+
+        {/* X 轴刻度 */}
+        {xTicks.map((tick, i) => (
+          <text key={`x-${i}`} x={xScale(tick.t)} y={H - 4}
+            textAnchor="middle" fill="#94a3b8" fontSize={isMobile ? '7' : '9'} fontFamily="system-ui">{tick.label}</text>
+        ))}
+
+        {/* 当前播放位置（竖线 + 圆点 + 人数气泡） */}
+        {currentTime > 0 && curTs >= minT && curTs <= maxT && (
+          <g>
+            <line x1={curXPos} y1={PAD_T} x2={curXPos} y2={H - PAD_B}
+              stroke="#07C160" strokeWidth="1" strokeDasharray="4,3" opacity="0.6" />
+            <circle cx={curXPos} cy={yScale(curCount)} r="4" fill="#07C160" stroke="white" strokeWidth="2" />
+            {/* 人数气泡 */}
+            <rect x={curXPos - 24} y={yScale(curCount) - 22} width="48" height="16"
+              rx="4" fill="#07C160" />
+            <text x={curXPos} y={yScale(curCount) - 11} textAnchor="middle"
+              fill="white" fontSize="9" fontWeight="bold" fontFamily="system-ui">{curCount.toLocaleString()}</text>
+          </g>
+        )}
+
+        {/* Hover tooltip */}
+        {hoverInfo && (
+          <g>
+            <line x1={hoverInfo.x} y1={PAD_T} x2={hoverInfo.x} y2={H - PAD_B}
+              stroke="#64748b" strokeWidth="0.5" strokeDasharray="3,2" />
+            <circle cx={hoverInfo.x} cy={yScale(hoverInfo.c)} r="3" fill="#07C160" stroke="white" strokeWidth="1.5" />
+            {/* 悬浮气泡 */}
+            <rect x={Math.min(hoverInfo.x - 32, W - PAD_R - 64)} y={Math.max(PAD_T, yScale(hoverInfo.c) - 36)}
+              width="64" height="28" rx="4" fill="rgba(15,23,42,0.85)" />
+            <text x={Math.min(hoverInfo.x, W - PAD_R - 32)} y={Math.max(PAD_T + 12, yScale(hoverInfo.c) - 22)}
+              textAnchor="middle" fill="white" fontSize="9" fontWeight="bold" fontFamily="system-ui">
+              {hoverInfo.c.toLocaleString()}
+            </text>
+            <text x={Math.min(hoverInfo.x, W - PAD_R - 32)} y={Math.max(PAD_T + 23, yScale(hoverInfo.c) - 11)}
+              textAnchor="middle" fill="#94a3b8" fontSize="7" fontFamily="system-ui">
+              {new Date(hoverInfo.t).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+            </text>
+          </g>
+        )}
+
+        {/* 最高峰标记 */}
+        {(() => {
+          const peakV = viewers.reduce((a, b) => b.c > a.c ? b : a);
+          return (
+            <g>
+              <circle cx={xScale(peakV.t)} cy={yScale(peakV.c)} r="3" fill="none" stroke="#f59e0b" strokeWidth="1.5" />
+              <text x={xScale(peakV.t)} y={yScale(peakV.c) - 6}
+                textAnchor="middle" fill="#f59e0b" fontSize="8" fontWeight="bold" fontFamily="system-ui">
+                ▲ {fmtCount(peakV.c)}
+              </text>
+            </g>
+          );
+        })()}
+      </svg>
+    </div>
+  );
+};
+
+// 弹幕列表组件（带自动跟随滚动）
+const DanmakuList: React.FC<{
+  comments: {t: number; n: string; c: string}[];
+  currentTime: number;
+  sessionStartTs: number;
+  onSeek: (t: number) => void;
+  scrollRef: React.RefObject<HTMLDivElement | null>;
+}> = ({ comments, currentTime, sessionStartTs, onSeek, scrollRef }) => {
+  const itemRefs = React.useRef<(HTMLDivElement | null)[]>([]);
+  const lastAutoScrollRef = React.useRef(0);
+
+  // 自动滚动到当前时间对应弹幕
+  React.useEffect(() => {
+    if (comments.length === 0) return;
+    const now = Date.now();
+    if (now - lastAutoScrollRef.current < 800) return; // 防抖
+    const curTs = sessionStartTs + currentTime * 1000;
+    // 找最近的弹幕
+    let closest = 0;
+    let minDiff = Infinity;
+    for (let i = 0; i < comments.length; i++) {
+      const diff = Math.abs(comments[i].t - curTs);
+      if (diff < minDiff) { minDiff = diff; closest = i; }
+    }
+    if (minDiff < 10000) {
+      const el = itemRefs.current[closest];
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        lastAutoScrollRef.current = now;
+      }
+    }
+  }, [Math.floor(currentTime / 3)]); // 每3秒检查一次
+
+  if (comments.length === 0) {
+    return <div className="flex-1 flex items-center justify-center text-slate-400 text-sm">暂无弹幕数据</div>;
+  }
+
+  const curTs = sessionStartTs + currentTime * 1000;
+  const fmtTs = (t: number) => {
+    const d = new Date(t);
+    return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`;
+  };
+
+  return (
+    <div ref={scrollRef} className="flex-1 overflow-y-auto min-h-0">
+      {comments.map((c, i) => {
+        const isActive = Math.abs(c.t - curTs) < 5000;
+        return (
+          <div
+            key={i}
+            ref={el => { itemRefs.current[i] = el; }}
+            onClick={() => {
+              const secs = (c.t - sessionStartTs) / 1000;
+              if (secs >= 0) onSeek(secs);
+            }}
+            className={`flex gap-2 px-3 py-1.5 cursor-pointer border-b border-slate-50 transition-colors ${
+              isActive ? 'bg-[rgba(7,193,96,0.06)]' : 'hover:bg-slate-50'
+            }`}
+          >
+            <span className="text-[10px] text-slate-300 font-mono shrink-0 pt-0.5">{fmtTs(c.t)}</span>
+            <span className="text-[11px] text-[#07C160] font-bold shrink-0 max-w-[80px] truncate">{c.n}</span>
+            <span className={`text-[12px] ${isActive ? 'text-slate-900' : 'text-slate-600'}`}>{c.c}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+};
+
+export default SessionListView;

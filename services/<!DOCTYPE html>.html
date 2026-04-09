@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>直播质检 UI 深度重构预览</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- 模拟 Lucide 图标 -->
+    <link href="https://cdn.jsdelivr.net/npm/lucide-static@0.344.0/font/lucide.min.css" rel="stylesheet">
+    <style>
+        body { background: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+        .glass-card { backdrop-filter: blur(8px); }
+        .evidence-card:active { transform: scale(0.98); }
+    </style>
+</head>
+<body class="p-10 flex flex-col items-center gap-12">
+
+    <!-- 漏讲警报容器 (模拟侧边栏组件) -->
+    <div class="w-[420px] bg-white rounded-[2.5rem] border-2 border-orange-100 shadow-2xl overflow-hidden flex flex-col transition-all hover:shadow-orange-200/50">
+        
+        <!-- HEADER: 状态栏 -->
+        <div class="bg-orange-500 text-white px-6 py-3.5 flex items-center justify-between">
+            <div class="flex items-center gap-2">
+                <i class="lc-alert-triangle text-sm animate-pulse"></i>
+                <span class="font-black text-[11px] uppercase tracking-[0.2em]">漏讲警报 #01</span>
+            </div>
+            <span class="text-[9px] font-mono opacity-50 font-bold">QA_ENGINE_V3.1</span>
+        </div>
+
+        <div class="p-6 space-y-5">
+            
+            <!-- 模块 1: 质检重点 (浅色背景，适配长文本) -->
+            <div class="bg-slate-50 border border-slate-100 rounded-2xl p-4">
+                <p class="text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-2 flex items-center gap-1">
+                    <i class="lc-clipboard-list text-[10px]"></i> 质检重点 (QA Focus)
+                </p>
+                <h4 class="font-black text-[15px] text-slate-800 leading-snug">
+                    学而思分层体系讲解、适配机型引导及12级台阶核心逻辑说明（长篇幅话术演示：此处即使有两三百字也能完美容纳，不会因为深色背景显得压抑...）
+                </h4>
+            </div>
+
+            <!-- 模块 2: 核心要素拆解 (定量打分 + 不合格红显) -->
+            <div class="bg-orange-50/30 rounded-2xl p-4 border border-orange-100/50 space-y-4">
+                <div class="flex items-center justify-between border-b border-orange-100 pb-2 mb-1">
+                    <p class="text-[9px] font-black text-orange-600 uppercase tracking-widest flex items-center gap-1">
+                        <i class="lc-sparkles text-[10px]"></i> 深度诊断与定量评分
+                    </p>
+                    <span class="text-[10px] font-black text-orange-700 bg-orange-100 px-2 py-0.5 rounded-full">综合: 20/100</span>
+                </div>
+
+                <!-- 要素 1: 不合格项 (文字标红 + 红色卡片) -->
+                <div class="bg-red-50/80 border border-red-100 rounded-xl p-3.5 transition-all shadow-sm">
+                    <div class="flex justify-between items-start mb-2">
+                        <div class="flex items-center gap-2">
+                            <span class="w-5 h-5 rounded-md bg-red-100 text-red-700 flex items-center justify-center text-[10px] font-bold">01</span>
+                            <span class="text-sm font-black text-red-700">12级分层教学逻辑</span>
+                        </div>
+                        <span class="text-[11px] font-black text-red-600 px-2 py-0.5 bg-red-100/50 rounded">0 / 25 分</span>
+                    </div>
+                    <p class="text-[11px] text-red-600/80 leading-relaxed pl-7 font-medium">
+                        主播完全未提及分层教学的具体台阶设置（12级/6级），核心逻辑讲解严重缺失。
+                    </p>
+                </div>
+
+                <!-- 要素 2: 合格项 (常规显示) -->
+                <div class="bg-white border border-orange-100/50 rounded-xl p-3.5 shadow-sm">
+                    <div class="flex justify-between items-start mb-2">
+                        <div class="flex items-center gap-2">
+                            <span class="w-5 h-5 rounded-md bg-orange-100 text-orange-700 flex items-center justify-center text-[10px] font-bold">02</span>
+                            <span class="text-sm font-black text-slate-800 tracking-tight">产品名称露出</span>
+                        </div>
+                        <span class="text-[11px] font-black text-green-600 px-2 py-0.5 bg-green-50 rounded">20 / 20 分</span>
+                    </div>
+                    <p class="text-[11px] text-slate-500 leading-relaxed pl-7">
+                        主播在开场及过程中准确报出了“学而思P4”产品名。
+                    </p>
+                </div>
+            </div>
+
+            <!-- 模块 3: 主播原话证据 (带跳转功能) -->
+            <div class="relative group cursor-pointer evidence-card">
+                <!-- 悬浮标签 -->
+                <div class="absolute -top-2 left-4 bg-blue-600 text-white text-[9px] font-black px-2.5 py-0.5 rounded shadow-lg flex items-center gap-1 z-10">
+                    <i class="lc-search text-[10px]"></i> 物理证据原文 (PHYSICAL EVIDENCE)
+                </div>
+                
+                <!-- 证据内容区 -->
+                <div class="bg-blue-50 border-2 border-blue-100 rounded-2xl p-4 pt-5 transition-all group-hover:border-blue-400 group-hover:shadow-md">
+                    <p class="text-[12px] text-blue-900 leading-relaxed italic font-bold">
+                        “那个...大家先看一下这款机器啊，就是这个学而思，具体的那个分层咱们详情页都有，我也就不多啰嗦了，直接看1号链接哈...”
+                    </p>
+                    <div class="mt-4 flex items-center justify-between border-t border-blue-100/50 pt-3">
+                        <div class="flex items-center gap-1.5 text-[10px] text-blue-500 font-bold">
+                            <i class="lc-arrow-down-circle text-xs"></i> 点击跳转下方原文高亮定位
+                        </div>
+                        <span class="text-[9px] font-mono text-blue-300">CURSOR: 14,235</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 跳转按钮 -->
+            <button class="w-full py-3 bg-slate-50 hover:bg-slate-100 border border-slate-200 text-slate-400 rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2">
+                去核对台人工复核 <i class="lc-chevron-right text-xs"></i>
+            </button>
+
+        </div>
+    </div>
+
+    <!-- 设计说明提示 -->
+    <div class="max-w-[500px] text-[11px] text-slate-400 bg-white p-6 rounded-2xl border border-slate-100 shadow-sm space-y-2">
+        <p class="font-bold text-slate-800 uppercase tracking-widest mb-3">UI 重构逻辑说明：</p>
+        <p>1. <b class="text-slate-600">质检重点</b> 使用浅色底（Slate-50），彻底放开篇幅限制，长文本不再压抑。</p>
+        <p>2. <b class="text-red-500">不合格红显</b> 当要素评分为 0 时，自动触发红色高亮模式，文字、分数、卡片背景同步变色。</p>
+        <p>3. <b class="text-blue-500">物理证据沉底</b> 作为卡片最底部的“证据层”，直接展示主播原话，点击效果与跳转逻辑已通过原型验证。</p>
+        <p>4. <b class="text-slate-400">核对台解耦</b> 下方详细卡片中的重复诊断块已物理取消，实现“一处分析，全屏复核”。</p>
+    </div>
+
+</body>
+</html>
